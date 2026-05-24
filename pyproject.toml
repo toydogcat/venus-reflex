@@ -1,0 +1,11 @@
+[project]
+name = "venus-reflex"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "opencc-python-reimplemented>=0.1.7",
+    "pillow>=12.2.0",
+    "reflex>=0.9.3",
+]
