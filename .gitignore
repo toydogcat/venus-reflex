@@ -227,6 +227,7 @@ TMP/
 raw/
 bank/
 !bank/spec.md
+script/
 # assets symlinks
 assets/bank
 assets/extracted/

@@ -5,6 +5,9 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "beautifulsoup4>=4.14.3",
+    "lxml>=6.1.1",
+    "mobi>=0.4.1",
     "opencc-python-reimplemented>=0.1.7",
     "pillow>=12.2.0",
     "reflex>=0.9.3",
