@@ -1,1 +1,9 @@
-[]
+[
+    {
+        "book_id": "red_river_vol01",
+        "book_title": "赤河戀影 01",
+        "page_index": 0,
+        "page_file": "0001.json",
+        "suggestion": "123"
+    }
+]
