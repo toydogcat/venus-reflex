@@ -208,6 +208,16 @@
       return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
     }
 
+    async function getCryptoParams(roomId, password) {
+      const key = await sha256Digest(password);
+      const topicRaw = roomId.toUpperCase() + "_" + password;
+      const hashHex = await sha256Hex(topicRaw);
+      const topicHash = hashHex.slice(0, 16);
+      const c2sTopic = `vreflex/rooms/${topicHash}/c2s`;
+      const s2cTopic = `vreflex/rooms/${topicHash}/s2c`;
+      return { key, c2sTopic, s2cTopic };
+    }
+
     async function encryptPayload(data, rawKey) {
       const key = await crypto.subtle.importKey(
         'raw', rawKey, { name: 'AES-GCM' }, false, ['encrypt']
