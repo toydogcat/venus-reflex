@@ -7,10 +7,17 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
+  pages: write
+  id-token: write
+
+# Prevent concurrent deployments
+concurrency:
+  group: "pages"
+  cancel-in-progress: true
 
 jobs:
-  deploy:
+  build:
     runs-on: ubuntu-latest
 
     steps:
@@ -32,7 +39,7 @@ jobs:
         with:
           bun-version: latest
 
-      - name: Install Python Dependencies
+      - name: Install Dependencies
         run: |
           uv sync
 
@@ -40,14 +47,24 @@ jobs:
         run: |
           uv run reflex export --frontend-only --no-zip
         env:
-          # If the user needs to override the API URL for production build:
-          # REFLEX_API_URL: https://your-backend-api.com
-          # For pure static hosting communicating via MQTT, we can set a dummy or leave it:
           REFLEX_API_URL: http://localhost:8003
 
-      - name: Deploy to GitHub Pages
-        uses: peaceiris/actions-gh-pages@v4
+      - name: Patch Paths for GitHub Pages Subpath
+        run: |
+          uv run python script/patch_gh_pages_paths.py
+
+      - name: Upload Pages Artifact
+        uses: actions/upload-pages-artifact@v3
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: .web/build/client
-          force_orphan: true
+          path: .web/build/client
+
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
