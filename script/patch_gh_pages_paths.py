@@ -15,18 +15,39 @@ def patch_file(file_path):
 
     # Replacements list
     replacements = [
+        # Double quotes
         ('"/assets/', f'"{BASE_PATH}/assets/'),
-        ("'/assets/", f"'{BASE_PATH}/assets/"),
-        ('href="/assets/', f'href="{BASE_PATH}/assets/'),
-        ('href="/favicon.ico"', f'href="{BASE_PATH}/favicon.ico"'),
         ('"/bgm.mp3"', f'"{BASE_PATH}/bgm.mp3"'),
         ('"/favicon.ico"', f'"{BASE_PATH}/favicon.ico"'),
         ('"/cache/', f'"{BASE_PATH}/cache/'),
         ('"/bank/', f'"{BASE_PATH}/bank/'),
+        ('"/reader"', f'"{BASE_PATH}/reader"'),
+        ('"/reader/', f'"{BASE_PATH}/reader/'),
+        
+        # Single quotes
+        ("'/assets/", f"'{BASE_PATH}/assets/"),
+        ("'/bgm.mp3'", f"'{BASE_PATH}/bgm.mp3'"),
+        ("'/favicon.ico'", f"'{BASE_PATH}/favicon.ico'"),
+        ("'/cache/", f"'{BASE_PATH}/cache/"),
+        ("'/bank/", f"'{BASE_PATH}/bank/"),
+        ("'/reader'", f"'{BASE_PATH}/reader'"),
+        ("'/reader/", f"'{BASE_PATH}/reader/"),
+        
+        # Backticks
+        ('`/assets/', f'`{BASE_PATH}/assets/'),
+        ('`/bgm.mp3`', f'`{BASE_PATH}/bgm.mp3`'),
+        ('`/bgm.mp3`', f'`{BASE_PATH}/bgm.mp3`'), # both exact and slash variations
+        ('`/favicon.ico`', f'`{BASE_PATH}/favicon.ico`'),
+        ('`/cache/', f'`{BASE_PATH}/cache/'),
+        ('`/bank/', f'`{BASE_PATH}/bank/'),
+        ('`/reader`', f'`{BASE_PATH}/reader`'),
+        ('`/reader/', f'`{BASE_PATH}/reader/'),
+
+        # HTML / basename specific
+        ('href="/assets/', f'href="{BASE_PATH}/assets/'),
+        ('href="/favicon.ico"', f'href="{BASE_PATH}/favicon.ico"'),
         ('"basename":"/"', f'"basename":"{BASE_PATH}/"'),
         ('"basename": "/"', f'"basename": "{BASE_PATH}/"'),
-        ('"/reader"', f'"{BASE_PATH}/reader"'),
-        ("'/reader'", f"'{BASE_PATH}/reader'"),
     ]
 
     modified = False
