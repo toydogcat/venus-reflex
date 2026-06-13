@@ -368,8 +368,9 @@
             resetToLogin();
           };
           
-          channel.onerror = (err) => {
-            log(`WebRTC DataChannel 錯誤: ${err.message}`, 'error');
+          channel.onerror = (event) => {
+            const errMsg = event.error ? event.error.message : (event.message || '連線錯誤');
+            log(`WebRTC DataChannel 錯誤: ${errMsg}`, 'error');
           };
           
           channel.onmessage = async (event) => {

@@ -334,7 +334,7 @@ class State(rx.State):
         self.is_logged_in = True
         self.is_mqtt_mode = False
         self.connection_status = ""
-        yield self.load_books()
+        await self.load_books()
 
     def logout(self):
         if self._mqtt_client:

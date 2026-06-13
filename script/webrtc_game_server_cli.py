@@ -264,123 +264,140 @@ def decrypt_payload(payload, key):
 
 # WebRTC 連線處理
 async def handle_webrtc_connection(offer_sdp, client_id):
-    key, c2s_topic, s2c_topic = get_crypto_params(ROOM_ID, PASSWORD)
-    log_message(f"開始為用戶 {client_id} 建立 WebRTC P2P 連線...")
-    
-    pc = RTCPeerConnection()
-    active_pcs.add(pc)
-    
-    @pc.on("datachannel")
-    def on_datachannel(channel):
-        log_message(f"WebRTC DataChannel '{channel.label}' 已順利接通!")
+    try:
+        key, c2s_topic, s2c_topic = get_crypto_params(ROOM_ID, PASSWORD)
+        log_message(f"開始為用戶 {client_id} 建立 WebRTC P2P 連線...")
         
-        @channel.on("message")
-        def on_message(message):
-            global messages_received
-            messages_received += 1
+        pc = RTCPeerConnection()
+        active_pcs.add(pc)
+        
+        @pc.on("datachannel")
+        def on_datachannel(channel):
+            log_message(f"WebRTC DataChannel '{channel.label}' 已順利接通!")
             
-            # 嘗試解密訊息
-            try:
-                decrypted = decrypt_payload(message, key)
-            except Exception as e:
-                log_message(f"DataChannel 訊息解密失敗: {e}")
-                return
+            @channel.on("message")
+            def on_message(message):
+                global messages_received
+                messages_received += 1
                 
-            if not decrypted:
-                log_message("DataChannel 收到無效的加密資料包")
-                return
-                
-            action = decrypted.get("action")
-            req_id = decrypted.get("request_id")
-            log_message(f"DataChannel 收到請求: action={action}, req_id={req_id}")
-            
-            if action == "ping":
-                reply = {"action": "pong", "request_id": req_id, "sender": "PythonServer", "timestamp": time.time()}
-                send_reply(channel, reply)
-                
-            elif action == "get_library":
-                books, cat_order = _blocking_load_books()
-                reply = {
-                    "action": "library_response",
-                    "request_id": req_id,
-                    "books": books,
-                    "category_order": cat_order
-                }
-                send_reply(channel, reply)
-                
-            elif action == "get_page":
-                book_id = decrypted.get("book_id")
-                page_file = decrypted.get("page_file")
-                
-                books, _ = _blocking_load_books()
-                book = next((b for b in books if str(b.get("id")) == str(book_id)), None)
-                
-                elements = []
-                if book:
-                    elements = load_page_elements_base64(book, page_file)
-                    
-                reply = {
-                    "action": "page_response",
-                    "request_id": req_id,
-                    "page_elements": elements
-                }
-                send_reply(channel, reply)
-                
-            elif action == "submit_suggestion":
-                suggestion = decrypted.get("suggestion")
-                s_file = BANK_DIR / "suggestions.json"
+                # 嘗試解密訊息
                 try:
-                    suggestions = []
-                    if s_file.exists():
-                        with open(s_file, 'r', encoding='utf-8') as f:
-                            suggestions = json.load(f)
-                    suggestions.append(suggestion)
-                    with open(s_file, 'w', encoding='utf-8') as f:
-                        json.dump(suggestions, f, ensure_ascii=False, indent=2)
-                    log_message(f"已儲存建議至 suggestions.json: {suggestion}")
-                    reply = {"action": "suggestion_response", "request_id": req_id, "success": True}
+                    decrypted = decrypt_payload(message, key)
                 except Exception as e:
-                    log_message(f"儲存建議失敗: {e}")
-                    reply = {"action": "suggestion_response", "request_id": req_id, "success": False, "error": str(e)}
-                send_reply(channel, reply)
+                    log_message(f"DataChannel 訊息解密失敗: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    return
+                    
+                if not decrypted:
+                    log_message("DataChannel 收到無效的加密資料包")
+                    return
+                    
+                try:
+                    action = decrypted.get("action")
+                    req_id = decrypted.get("request_id")
+                    log_message(f"DataChannel 收到請求: action={action}, req_id={req_id}")
+                    
+                    if action == "ping":
+                        reply = {"action": "pong", "request_id": req_id, "sender": "PythonServer", "timestamp": time.time()}
+                        send_reply(channel, reply)
+                        
+                    elif action == "get_library":
+                        books, cat_order = _blocking_load_books()
+                        reply = {
+                            "action": "library_response",
+                            "request_id": req_id,
+                            "books": books,
+                            "category_order": cat_order
+                        }
+                        send_reply(channel, reply)
+                        
+                    elif action == "get_page":
+                        book_id = decrypted.get("book_id")
+                        page_file = decrypted.get("page_file")
+                        
+                        books, _ = _blocking_load_books()
+                        book = next((b for b in books if str(b.get("id")) == str(book_id)), None)
+                        
+                        elements = []
+                        if book:
+                            elements = load_page_elements_base64(book, page_file)
+                            
+                        reply = {
+                            "action": "page_response",
+                            "request_id": req_id,
+                            "page_elements": elements
+                        }
+                        send_reply(channel, reply)
+                        
+                    elif action == "submit_suggestion":
+                        suggestion = decrypted.get("suggestion")
+                        s_file = BANK_DIR / "suggestions.json"
+                        try:
+                            suggestions = []
+                            if s_file.exists():
+                                with open(s_file, 'r', encoding='utf-8') as f:
+                                    suggestions = json.load(f)
+                            suggestions.append(suggestion)
+                            with open(s_file, 'w', encoding='utf-8') as f:
+                                json.dump(suggestions, f, ensure_ascii=False, indent=2)
+                            log_message(f"已儲存建議至 suggestions.json: {suggestion}")
+                            reply = {"action": "suggestion_response", "request_id": req_id, "success": True}
+                        except Exception as e:
+                            log_message(f"儲存建議失敗: {e}")
+                            reply = {"action": "suggestion_response", "request_id": req_id, "success": False, "error": str(e)}
+                        send_reply(channel, reply)
+                except Exception as e:
+                    log_message(f"處理 DataChannel 請求時發生錯誤: {e}")
+                    import traceback
+                    traceback.print_exc()
 
-    @pc.on("connectionstatechange")
-    def on_connectionstatechange():
-        log_message(f"WebRTC 連線狀態變更: {pc.connectionState}")
-        if pc.connectionState in ["failed", "closed"]:
-            active_pcs.discard(pc)
-            log_message(f"用戶 {client_id} 的 WebRTC 連線已斷開")
+        @pc.on("connectionstatechange")
+        def on_connectionstatechange():
+            log_message(f"WebRTC 連線狀態變更: {pc.connectionState}")
+            if pc.connectionState in ["failed", "closed"]:
+                active_pcs.discard(pc)
+                log_message(f"用戶 {client_id} 的 WebRTC 連線已斷開")
 
-    # 設定遠端描述
-    offer = RTCSessionDescription(sdp=offer_sdp, type="offer")
-    await pc.setRemoteDescription(offer)
-    
-    # 建立 Answer
-    answer = await pc.createAnswer()
-    await pc.setLocalDescription(answer)
-    
-    # 等待 ICE 候選收集完成
-    log_message("收集本機 ICE 候選中...")
-    while pc.iceGatheringState != "complete":
-        await asyncio.sleep(0.05)
+        # 設定遠端描述
+        offer = RTCSessionDescription(sdp=offer_sdp, type="offer")
+        await pc.setRemoteDescription(offer)
         
-    # 送出 Answer
-    reply = {
-        "type": "answer",
-        "sdp": pc.localDescription.sdp,
-        "client_id": client_id,
-        "sender": "PythonServer"
-    }
-    encrypted = encrypt_payload(reply, key)
-    if encrypted:
-        mqtt_client.publish(s2c_topic, encrypted)
-        log_message(f"已回傳 WebRTC SDP Answer 至 {s2c_topic}")
+        # 建立 Answer
+        answer = await pc.createAnswer()
+        await pc.setLocalDescription(answer)
+        
+        # 等待 ICE 候選收集完成
+        log_message("收集本機 ICE 候選中...")
+        while pc.iceGatheringState != "complete":
+            await asyncio.sleep(0.05)
+            
+        # 送出 Answer
+        reply = {
+            "type": "answer",
+            "sdp": pc.localDescription.sdp,
+            "client_id": client_id,
+            "sender": "PythonServer"
+        }
+        encrypted = encrypt_payload(reply, key)
+        if encrypted:
+            mqtt_client.publish(s2c_topic, encrypted)
+            log_message(f"已回傳 WebRTC SDP Answer 至 {s2c_topic}")
+    except Exception as e:
+        log_message(f"建立 WebRTC 連線時發生崩潰: {e}")
+        import traceback
+        traceback.print_exc()
 
 def send_reply(channel, data_dict):
-    key, _, _ = get_crypto_params(ROOM_ID, PASSWORD)
-    encrypted = encrypt_payload(data_dict, key)
-    if encrypted:
-        channel.send(encrypted)
+    try:
+        key, _, _ = get_crypto_params(ROOM_ID, PASSWORD)
+        encrypted = encrypt_payload(data_dict, key)
+        if encrypted:
+            channel.send(encrypted)
+    except Exception as e:
+        log_message(f"發送 DataChannel 響應時失敗: {e}")
+        import traceback
+        traceback.print_exc()
 
 # MQTT 回呼函數 (信令)
 def on_connect(client, userdata, flags, reason_code, properties):
@@ -393,25 +410,36 @@ def on_connect(client, userdata, flags, reason_code, properties):
         log_message(f"信令連線失敗，原因代碼: {reason_code}")
 
 def on_message(client, userdata, msg):
-    key, c2s_topic, s2c_topic = get_crypto_params(ROOM_ID, PASSWORD)
-    decrypted = decrypt_payload(msg.payload, key)
-    
-    if decrypted:
-        msg_type = decrypted.get("type")
-        client_id = decrypted.get("client_id")
+    try:
+        key, c2s_topic, s2c_topic = get_crypto_params(ROOM_ID, PASSWORD)
+        decrypted = decrypt_payload(msg.payload, key)
         
-        if msg_type == "offer":
-            sdp = decrypted.get("sdp")
-            asyncio.run_coroutine_threadsafe(
-                handle_webrtc_connection(sdp, client_id),
-                event_loop
-            )
-    else:
-        try:
-            raw_text = msg.payload.decode('utf-8')
-            log_message(f"收到未加密訊息 (密碼不符): {raw_text}")
-        except:
-            pass
+        if decrypted:
+            msg_type = decrypted.get("type")
+            client_id = decrypted.get("client_id")
+            
+            if msg_type == "offer":
+                sdp = decrypted.get("sdp")
+                future = asyncio.run_coroutine_threadsafe(
+                    handle_webrtc_connection(sdp, client_id),
+                    event_loop
+                )
+                def done_callback(f):
+                    try:
+                        f.result()
+                    except Exception as ex:
+                        log_message(f"WebRTC 任務執行發生未捕獲異常: {ex}")
+                future.add_done_callback(done_callback)
+        else:
+            try:
+                raw_text = msg.payload.decode('utf-8')
+                log_message(f"收到未加密訊息 (密碼不符): {raw_text}")
+            except:
+                pass
+    except Exception as e:
+        log_message(f"處理信令訊息時出錯: {e}")
+        import traceback
+        traceback.print_exc()
 
 def start_server():
     global mqtt_client, loop_thread, event_loop, is_running
