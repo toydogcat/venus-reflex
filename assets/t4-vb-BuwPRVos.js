@@ -1,0 +1,1 @@
+import e from"./t4-templating-C2g3UA1-.js";import t from"./vbnet-Cy1NBdH9.js";n.displayName=`t4-vb`,n.aliases=[];function n(n){n.register(e),n.register(t),n.languages[`t4-vb`]=n.languages[`t4-templating`].createT4(`vbnet`)}export{n as default};
