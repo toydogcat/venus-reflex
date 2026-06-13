@@ -231,6 +231,7 @@ bank/
 script/*
 !script/patch_gh_pages_paths.py
 !script/mqtt_game_server_cli.py
+!script/webrtc_game_server_cli.py
 # assets symlinks
 assets/bank
 assets/extracted/

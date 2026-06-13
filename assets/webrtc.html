@@ -1,0 +1,812 @@
+<!DOCTYPE html>
+<html lang="zh-TW" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Venus Reader (WebRTC P2P)</title>
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- MQTT.js CDN -->
+  <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+  <!-- Lucide Icons CDN -->
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <!-- Google Fonts -->
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    body {
+      font-family: 'Outfit', sans-serif;
+      background: radial-gradient(circle at top right, #1a0b2e, #0a0515);
+      min-height: 100vh;
+      color: #fff;
+    }
+    .glass {
+      background: rgba(20, 20, 20, 0.55);
+      backdrop-filter: blur(16px);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+    }
+  </style>
+</head>
+<body class="p-4 md:p-8 flex flex-col items-center">
+
+  <!-- Header -->
+  <header class="w-full max-w-6xl mb-8 flex justify-between items-center z-10">
+    <div class="flex items-center gap-3">
+      <div class="h-10 w-10 rounded-xl bg-gradient-to-tr from-pink-500 to-violet-600 flex items-center justify-center shadow-lg shadow-pink-500/30">
+        <i data-lucide="book-open" class="h-5 w-5 text-white"></i>
+      </div>
+      <div>
+        <h1 class="text-2xl font-bold bg-gradient-to-r from-pink-500 to-violet-500 bg-clip-text text-transparent">Venus Reader</h1>
+        <p class="text-xs text-gray-400 tracking-wider uppercase">P2P Pure WebRTC Client</p>
+      </div>
+    </div>
+    <div id="header-actions" class="hidden flex items-center gap-4">
+      <button id="logout-btn" class="px-4 py-2 text-sm rounded-lg border border-red-500/30 text-red-400 hover:bg-red-500/10 transition">登出</button>
+    </div>
+  </header>
+
+  <!-- Main Container -->
+  <main class="w-full max-w-6xl flex-grow flex flex-col justify-center items-center">
+
+    <!-- 1. Connection Panel -->
+    <div id="conn-panel" class="w-full max-w-md p-8 rounded-2xl glass shadow-2xl flex flex-col gap-6">
+      <div class="text-center">
+        <h2 class="text-3xl font-bold mb-2">P2P 點對點連線</h2>
+        <p class="text-sm text-gray-400">使用房號與密碼，透過 WebRTC 與您的本機電腦直接連線，無須轉發伺服器。</p>
+      </div>
+
+      <div class="space-y-4">
+        <div>
+          <label class="block text-xs font-medium text-gray-300 uppercase tracking-wider mb-2">房號 (Room ID)</label>
+          <input type="text" id="room-input" placeholder="e.g. 5S8A2" class="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white placeholder-gray-500 focus:outline-none focus:border-pink-500 transition uppercase">
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-gray-300 uppercase tracking-wider mb-2">密碼 (Password)</label>
+          <input type="password" id="pass-input" placeholder="••••••••" class="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white placeholder-gray-500 focus:outline-none focus:border-pink-500 transition">
+        </div>
+      </div>
+
+      <button id="connect-btn" class="w-full py-4 rounded-xl bg-gradient-to-r from-pink-500 to-violet-600 font-semibold text-white shadow-lg shadow-pink-500/20 hover:scale-[1.01] hover:shadow-pink-500/40 transition active:scale-95 flex justify-center items-center gap-2">
+        <i data-lucide="zap" class="h-4 w-4"></i> 連線至本機伺服器
+      </button>
+
+      <!-- Logging Terminal -->
+      <div class="mt-4">
+        <div class="flex items-center justify-between mb-2">
+          <span class="text-xs text-gray-400 font-mono">連線終端日誌</span>
+          <span id="conn-status" class="text-xs text-amber-400">尚未連線</span>
+        </div>
+        <div id="terminal" class="h-32 rounded-xl bg-black/40 border border-white/5 p-3 font-mono text-xs overflow-y-auto space-y-1 text-gray-300 scrollbar-thin">
+          <div>[System] 等待連線指令...</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 2. Library View -->
+    <div id="library-view" class="hidden w-full flex flex-col gap-6">
+      <!-- Search & Filters -->
+      <div class="flex flex-col md:flex-row gap-4 justify-between items-center w-full">
+        <!-- Search -->
+        <div class="relative w-full md:max-w-md">
+          <input type="text" id="search-input" placeholder="搜尋書名、作者或分類..." class="w-full pl-10 pr-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white placeholder-gray-500 focus:outline-none focus:border-pink-500 transition">
+          <i data-lucide="search" class="absolute left-3.5 top-3.5 h-4 w-4 text-gray-400"></i>
+        </div>
+        <!-- Categories tabs -->
+        <div id="cat-tabs" class="flex flex-wrap gap-2 justify-start items-center w-full md:w-auto">
+          <!-- Dynamically populated -->
+        </div>
+      </div>
+
+      <!-- Books Grid -->
+      <div id="books-grid" class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-6">
+        <!-- Dynamically populated -->
+      </div>
+    </div>
+
+    <!-- 3. Volume Selector -->
+    <div id="volume-view" class="hidden w-full flex flex-col gap-6">
+      <div class="flex items-center gap-4 border-b border-white/10 pb-4">
+        <button id="vol-back-btn" class="px-4 py-2 rounded-lg bg-white/5 border border-white/10 hover:bg-white/10 transition flex items-center gap-2 text-sm">
+          <i data-lucide="arrow-left" class="h-4 w-4"></i> 返回書庫
+        </button>
+        <h2 id="vol-book-title" class="text-xl font-bold">書籍集數列表</h2>
+      </div>
+      <div id="volumes-grid" class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+        <!-- Dynamically populated -->
+      </div>
+    </div>
+
+    <!-- 4. Reader View -->
+    <div id="reader-view" class="hidden w-full flex flex-col gap-6">
+      <!-- Reader Header -->
+      <div class="flex flex-col md:flex-row gap-4 items-center justify-between border-b border-white/10 pb-4">
+        <div class="flex items-center gap-4 w-full md:w-auto">
+          <button id="reader-back-btn" class="px-4 py-2 rounded-lg bg-white/5 border border-white/10 hover:bg-white/10 transition flex items-center gap-2 text-sm">
+            <i data-lucide="arrow-left" class="h-4 w-4"></i> 返回
+          </button>
+          <div>
+            <h2 id="reader-book-title" class="text-lg font-bold">正在閱讀</h2>
+            <p id="reader-vol-title" class="text-xs text-gray-400"></p>
+          </div>
+        </div>
+
+        <div class="flex items-center gap-3 w-full md:w-auto justify-end">
+          <button id="vol-menu-btn" class="px-3 py-2 text-sm rounded-lg border border-white/10 hover:bg-white/5 transition">集數目錄</button>
+          <button id="dual-mode-btn" class="px-3 py-2 text-sm rounded-lg border border-white/10 hover:bg-white/5 transition flex items-center gap-1">
+            <i data-lucide="columns" class="h-4 w-4"></i> <span>單頁模式</span>
+          </button>
+          <div class="relative group">
+            <button class="px-3 py-2 text-sm rounded-lg border border-white/10 hover:bg-white/5 transition flex items-center gap-1">
+              <i data-lucide="type" class="h-4 w-4"></i> <span>字型</span>
+            </button>
+            <div class="absolute right-0 top-12 hidden group-hover:block w-48 p-4 rounded-xl glass shadow-xl z-20 space-y-2">
+              <span id="font-size-text" class="text-xs text-gray-300">字型大小: 18px</span>
+              <input type="range" id="font-size-slider" min="12" max="40" value="18" class="w-full accent-pink-500">
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Navigation Top -->
+      <div class="flex justify-between items-center gap-4 max-w-xl mx-auto w-full">
+        <button id="prev-vol-btn" class="px-3 py-2 rounded-lg bg-white/5 text-xs text-gray-300 disabled:opacity-30">« 上一卷</button>
+        <button id="prev-page-btn" class="px-3 py-2 rounded-lg bg-white/5 text-sm text-gray-200 disabled:opacity-30">上一頁</button>
+        <span id="page-display" class="text-sm font-medium">第 1 / 1 頁</span>
+        <button id="next-page-btn" class="px-3 py-2 rounded-lg bg-white/5 text-sm text-gray-200 disabled:opacity-30">下一頁</button>
+        <button id="next-vol-btn" class="px-3 py-2 rounded-lg bg-white/5 text-xs text-gray-300 disabled:opacity-30">下一卷 »</button>
+      </div>
+
+      <!-- Reading Area -->
+      <div class="w-full relative bg-[#151515] border border-white/5 rounded-2xl min-h-[60vh] flex flex-col md:flex-row overflow-hidden">
+        <!-- Click Zone Overlay -->
+        <div class="absolute inset-0 z-10 pointer-events-none flex">
+          <div id="click-left" class="w-1/3 h-full cursor-pointer pointer-events-auto"></div>
+          <div class="w-1/3 h-full pointer-events-none"></div>
+          <div id="click-right" class="w-1/3 h-full cursor-pointer pointer-events-auto"></div>
+        </div>
+
+        <div id="page-left" class="w-full md:w-1/2 flex flex-col items-center justify-center p-4 relative min-h-[50vh] overflow-y-auto"></div>
+        <div id="page-right" class="w-full md:w-1/2 flex flex-col items-center justify-center p-4 relative min-h-[50vh] overflow-y-auto border-t md:border-t-0 md:border-l border-white/10 hidden"></div>
+      </div>
+
+      <!-- Navigation Bottom -->
+      <div class="flex flex-col gap-4 max-w-xl mx-auto w-full items-center">
+        <div class="flex justify-between items-center gap-4 w-full">
+          <button id="prev-vol-btn-b" class="px-3 py-2 rounded-lg bg-white/5 text-xs text-gray-300 disabled:opacity-30">« 上一卷</button>
+          <button id="prev-page-btn-b" class="px-3 py-2 rounded-lg bg-white/5 text-sm text-gray-200 disabled:opacity-30">上一頁</button>
+          <span id="page-display-b" class="text-sm font-medium">第 1 / 1 頁</span>
+          <button id="next-page-btn-b" class="px-3 py-2 rounded-lg bg-white/5 text-sm text-gray-200 disabled:opacity-30">下一頁</button>
+          <button id="next-vol-btn-b" class="px-3 py-2 rounded-lg bg-white/5 text-xs text-gray-300 disabled:opacity-30">下一卷 »</button>
+        </div>
+        <div class="flex gap-2 w-full justify-center">
+          <input type="number" id="jump-input" placeholder="跳頁..." class="w-24 px-3 py-2 text-sm rounded-lg bg-white/5 border border-white/10 text-white text-center focus:outline-none">
+          <button id="jump-btn" class="px-4 py-2 rounded-lg bg-pink-600 hover:bg-pink-700 text-sm font-medium transition">跳轉</button>
+        </div>
+      </div>
+
+      <!-- Suggestions Box -->
+      <div class="w-full max-w-xl mx-auto p-4 rounded-xl border border-white/10 space-y-3 mt-4">
+        <h3 class="font-bold text-sm">回報與建議</h3>
+        <textarea id="suggest-input" placeholder="請輸入您的建議或糾錯..." class="w-full h-20 p-3 text-sm rounded-lg bg-white/5 border border-white/10 text-white placeholder-gray-500 focus:outline-none focus:border-pink-500 transition resize-none"></textarea>
+        <button id="suggest-btn" class="px-4 py-2 rounded-lg bg-violet-600 hover:bg-violet-700 text-sm font-medium transition">提交建議</button>
+      </div>
+    </div>
+
+  </main>
+
+  <script>
+    // Crypto utilities
+    async function sha256Digest(str) {
+      const msgUint8 = new TextEncoder().encode(str);
+      const hashBuffer = await crypto.subtle.digest('SHA-256', msgUint8);
+      return new Uint8Array(hashBuffer);
+    }
+
+    async function sha256Hex(str) {
+      const msgUint8 = new TextEncoder().encode(str);
+      const hashBuffer = await crypto.subtle.digest('SHA-256', msgUint8);
+      const hashArray = Array.from(new Uint8Array(hashBuffer));
+      return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+    }
+
+    async function encryptPayload(data, rawKey) {
+      const key = await crypto.subtle.importKey(
+        'raw', rawKey, { name: 'AES-GCM' }, false, ['encrypt']
+      );
+      const nonce = crypto.getRandomValues(new Uint8Array(12));
+      const plaintext = new TextEncoder().encode(JSON.stringify(data));
+      const ciphertext = await crypto.subtle.encrypt(
+        { name: 'AES-GCM', iv: nonce }, key, plaintext
+      );
+      const combined = new Uint8Array(nonce.length + ciphertext.byteLength);
+      combined.set(nonce);
+      combined.set(new Uint8Array(ciphertext), nonce.length);
+      return combined;
+    }
+
+    async function decryptPayload(combinedBytes, rawKey) {
+      const key = await crypto.subtle.importKey(
+        'raw', rawKey, { name: 'AES-GCM' }, false, ['decrypt']
+      );
+      const nonce = combinedBytes.slice(0, 12);
+      const ciphertext = combinedBytes.slice(12);
+      const decrypted = await crypto.subtle.decrypt(
+        { name: 'AES-GCM', iv: nonce }, key, ciphertext
+      );
+      return JSON.parse(new TextDecoder().decode(decrypted));
+    }
+
+    // Logger
+    function log(text, type = 'info') {
+      const terminal = document.getElementById('terminal');
+      const time = new Date().toLocaleTimeString();
+      let colorClass = 'text-gray-300';
+      if (type === 'success') colorClass = 'text-emerald-400';
+      if (type === 'error') colorClass = 'text-red-400';
+      if (type === 'warning') colorClass = 'text-amber-400';
+
+      const entry = document.createElement('div');
+      entry.className = colorClass;
+      entry.innerHTML = `[${time}] ${text}`;
+      terminal.appendChild(entry);
+      terminal.scrollTop = terminal.scrollHeight;
+    }
+
+    // Global variables
+    let rawKey = null;
+    let pc = null;
+    let channel = null;
+    let mqttClient = null;
+    let clientId = 'client_' + Math.random().toString(36).substring(2, 9);
+    
+    let books = [];
+    let categories = [];
+    let activeCategory = 'all';
+    
+    let currentBook = null;
+    let currentVolume = null;
+    let currentPageIndex = 0;
+    let isDualMode = false;
+    let novelFontSize = 18;
+    
+    const pendingRequests = new Map();
+
+    // Send RPC Request over WebRTC DataChannel
+    function sendRequest(req) {
+      const requestId = Math.random().toString(36).substring(2, 11);
+      req.request_id = requestId;
+      
+      return new Promise((resolve, reject) => {
+        pendingRequests.set(requestId, { resolve, reject, timestamp: Date.now() });
+        encryptPayload(req, rawKey).then(encrypted => {
+          if (channel && channel.readyState === 'open') {
+            channel.send(encrypted);
+          } else {
+            reject(new Error('DataChannel 未開啟或已中斷'));
+          }
+        });
+        
+        setTimeout(() => {
+          if (pendingRequests.has(requestId)) {
+            pendingRequests.delete(requestId);
+            reject(new Error('伺服器處理逾時，請檢查連線狀態'));
+          }
+        }, 20000);
+      });
+    }
+
+    // Initialize WebRTC
+    async function startConnection(roomId, password) {
+      document.getElementById('connect-btn').disabled = true;
+      document.getElementById('connect-btn').innerText = '正在建立 P2P 連線...';
+      document.getElementById('conn-status').className = 'text-amber-400';
+      document.getElementById('conn-status').innerText = '建立中...';
+      
+      try {
+        log('正在計算金鑰並生成信令管道...');
+        const params = await getCryptoParams(roomId, password);
+        rawKey = params.key;
+        
+        log(`連接至公共信令伺服器...`);
+        mqttClient = mqtt.connect('wss://broker.emqx.io:8084/mqtt');
+        
+        mqttClient.on('connect', () => {
+          log('信令通道已建立，正在訂閱回傳主題...', 'success');
+          mqttClient.subscribe(params.s2cTopic);
+          
+          // 初始化 WebRTC RTCPeerConnection
+          log('初始化 WebRTC 端點與 STUN 穿透防護器...');
+          pc = new RTCPeerConnection({
+            iceServers: [
+              { urls: 'stun:stun.l.google.com:19302' },
+              { urls: 'stun:stun1.l.google.com:19302' },
+              { urls: 'stun:stun2.l.google.com:19302' }
+            ]
+          });
+          
+          // 建立 DataChannel
+          channel = pc.createDataChannel('vreflex_channel');
+          channel.binaryType = 'arraybuffer';
+          
+          channel.onopen = () => {
+            log('⚡ WebRTC P2P DataChannel 已成功打通！', 'success');
+            document.getElementById('conn-status').className = 'text-emerald-400';
+            document.getElementById('conn-status').innerText = '連線成功';
+            
+            // 安全關閉信令伺服器
+            mqttClient.end();
+            log('已安全離線公共信令代理伺服器。', 'success');
+            
+            // 獲取書庫清單
+            log('正在獲取書庫圖書清單...');
+            sendRequest({ action: 'get_library' }).then(res => {
+              books = res.books;
+              categories = res.category_order;
+              log(`已成功載入 ${books.length} 本書籍！`, 'success');
+              
+              // 進入書庫畫面
+              document.getElementById('conn-panel').classList.add('hidden');
+              document.getElementById('library-view').classList.remove('hidden');
+              document.getElementById('header-actions').classList.remove('hidden');
+              renderLibrary();
+            }).catch(err => {
+              log(`獲取書庫失敗: ${err.message}`, 'error');
+            });
+          };
+          
+          channel.onclose = () => {
+            log('WebRTC 連線已關閉', 'warning');
+            resetToLogin();
+          };
+          
+          channel.onerror = (err) => {
+            log(`WebRTC DataChannel 錯誤: ${err.message}`, 'error');
+          };
+          
+          channel.onmessage = async (event) => {
+            try {
+              const decrypted = await decryptPayload(new Uint8Array(event.data), rawKey);
+              const reqId = decrypted.request_id;
+              if (pendingRequests.has(reqId)) {
+                const { resolve } = pendingRequests.get(reqId);
+                pendingRequests.delete(reqId);
+                resolve(decrypted);
+              }
+            } catch (e) {
+              log(`解析 DataChannel 訊息失敗: ${e.message}`, 'error');
+            }
+          };
+          
+          // 建立 Offer
+          pc.createOffer().then(async offer => {
+            await pc.setLocalDescription(offer);
+            
+            // 等待 ICE 候選收集完成（ICE Trickling Done）
+            log('收集 ICE Candidate 網路節點中...');
+            await new Promise((resolve) => {
+              if (pc.iceGatheringState === 'complete') {
+                resolve();
+              } else {
+                function check() {
+                  if (pc.iceGatheringState === 'complete') {
+                    pc.removeEventListener('icegatheringstatechange', check);
+                    resolve();
+                  }
+                }
+                pc.addEventListener('icegatheringstatechange', check);
+              }
+            });
+            
+            log('ICE 節點收集完成，送出 SDP Offer 信令...');
+            const offerPayload = {
+              type: 'offer',
+              sdp: pc.localDescription.sdp,
+              client_id: clientId
+            };
+            const encryptedOffer = await encryptPayload(offerPayload, rawKey);
+            mqttClient.publish(params.c2sTopic, encryptedOffer);
+            log('等待本機伺服器響應 SDP Answer...');
+          });
+        });
+        
+        mqttClient.on('message', async (topic, message) => {
+          try {
+            const decrypted = await decryptPayload(message, rawKey);
+            if (decrypted && decrypted.type === 'answer' && decrypted.client_id === clientId) {
+              log('收到 SDP Answer 響應，設定遠端連接描述...');
+              const answer = new RTCSessionDescription({
+                type: 'answer',
+                sdp: decrypted.sdp
+              });
+              await pc.setRemoteDescription(answer);
+              log('正在接通 P2P 通道...');
+            }
+          } catch (err) {
+            log(`信令解析出錯（可能是密碼不正確）：${err.message}`, 'error');
+          }
+        });
+        
+        mqttClient.on('error', (err) => {
+          log(`信令伺服器錯誤: ${err.message}`, 'error');
+        });
+        
+      } catch (err) {
+        log(`連線失敗: ${err.message}`, 'error');
+        resetToLogin();
+      }
+    }
+
+    function resetToLogin() {
+      if (pc) { pc.close(); pc = null; }
+      if (mqttClient) { mqttClient.end(); mqttClient = null; }
+      rawKey = null;
+      channel = null;
+      
+      document.getElementById('connect-btn').disabled = false;
+      document.getElementById('connect-btn').innerText = '連線至本機伺服器';
+      document.getElementById('conn-status').className = 'text-red-400';
+      document.getElementById('conn-status').innerText = '已斷線';
+      
+      document.getElementById('conn-panel').classList.remove('hidden');
+      document.getElementById('library-view').classList.add('hidden');
+      document.getElementById('volume-view').classList.add('hidden');
+      document.getElementById('reader-view').classList.add('hidden');
+      document.getElementById('header-actions').classList.add('hidden');
+    }
+
+    // Render Library
+    function renderLibrary() {
+      const grid = document.getElementById('books-grid');
+      const tabs = document.getElementById('cat-tabs');
+      grid.innerHTML = '';
+      tabs.innerHTML = '';
+      
+      // Category Tab all
+      const allTab = document.createElement('button');
+      allTab.className = `px-3 py-1.5 rounded-lg text-sm font-medium transition ${activeCategory === 'all' ? 'bg-pink-600 text-white' : 'bg-white/5 hover:bg-white/10 text-gray-300'}`;
+      allTab.innerText = '全部書籍';
+      allTab.onclick = () => { activeCategory = 'all'; renderLibrary(); };
+      tabs.appendChild(allTab);
+      
+      // Populate unique categories found in books
+      const bookCats = Array.from(new Set(books.map(b => b.category).filter(Boolean)));
+      bookCats.forEach(cat => {
+        const tab = document.createElement('button');
+        tab.className = `px-3 py-1.5 rounded-lg text-sm font-medium transition ${activeCategory === cat ? 'bg-pink-600 text-white' : 'bg-white/5 hover:bg-white/10 text-gray-300'}`;
+        tab.innerText = cat;
+        tab.onclick = () => { activeCategory = cat; renderLibrary(); };
+        tabs.appendChild(tab);
+      });
+      
+      // Filter books
+      const query = document.getElementById('search-input').value.toLowerCase().trim();
+      const filtered = books.filter(b => {
+        const matchCat = activeCategory === 'all' || b.category === activeCategory;
+        const matchQuery = !query || b.title.toLowerCase().includes(query) || b.author.toLowerCase().includes(query) || (b.category && b.category.toLowerCase().includes(query));
+        return matchCat && matchQuery;
+      });
+      
+      if (filtered.length === 0) {
+        grid.innerHTML = '<div class="col-span-full py-12 text-center text-gray-400 text-sm">沒有找到符合搜尋條件的書籍。</div>';
+        return;
+      }
+      
+      filtered.forEach(book => {
+        const card = document.createElement('div');
+        card.className = 'rounded-xl bg-white/5 border border-white/5 overflow-hidden flex flex-col hover:scale-[1.02] hover:bg-white/10 transition shadow-lg';
+        card.innerHTML = `
+          <div class="h-48 w-full bg-black/40 relative">
+            <img src="${book.cover_src || 'https://images.unsplash.com/photo-1543002588-bfa74002ed7e?w=300&auto=format&fit=crop'}" class="h-full w-full object-cover" alt="cover">
+            <span class="absolute top-2 right-2 px-2 py-0.5 text-[10px] bg-black/75 rounded text-pink-400 font-semibold">${book.category || '未分類'}</span>
+          </div>
+          <div class="p-4 flex-grow flex flex-col gap-2">
+            <h3 class="font-bold text-sm text-gray-100 line-clamp-1">${book.title}</h3>
+            <p class="text-xs text-gray-400 line-clamp-1">作者: ${book.author || '未知'}</p>
+            <button class="mt-auto w-full py-2 bg-pink-600/20 text-pink-400 hover:bg-pink-600 hover:text-white rounded-lg text-xs font-semibold transition">開始閱讀</button>
+          </div>
+        `;
+        card.querySelector('button').onclick = () => selectBook(book);
+        grid.appendChild(card);
+      });
+    }
+
+    function selectBook(book) {
+      currentBook = book;
+      if (book.volumes && book.volumes.length > 0) {
+        // Show Volumes
+        document.getElementById('library-view').classList.add('hidden');
+        document.getElementById('volume-view').classList.remove('hidden');
+        document.getElementById('vol-book-title').innerText = book.title;
+        renderVolumes();
+      } else {
+        // Read directly
+        currentVolume = null;
+        currentPageIndex = 0;
+        document.getElementById('library-view').classList.add('hidden');
+        document.getElementById('reader-view').classList.remove('hidden');
+        document.getElementById('reader-book-title').innerText = book.title;
+        document.getElementById('reader-vol-title').innerText = '單冊書籍';
+        
+        // Hide volume catalog btn
+        document.getElementById('vol-menu-btn').classList.add('hidden');
+        loadPage();
+      }
+    }
+
+    function renderVolumes() {
+      const grid = document.getElementById('volumes-grid');
+      grid.innerHTML = '';
+      
+      currentBook.volumes.forEach(vol => {
+        const card = document.createElement('div');
+        card.className = 'p-4 rounded-xl border border-white/5 bg-white/5 hover:bg-white/10 transition cursor-pointer flex flex-col gap-2 shadow-lg';
+        card.innerHTML = `
+          <h4 class="font-bold text-sm text-gray-100">${vol.title}</h4>
+          <p class="text-xs text-gray-400">頁碼: 第 ${vol.start_page} 頁 - 第 ${vol.end_page} 頁</p>
+          <button class="mt-3 w-full py-2 bg-violet-600 hover:bg-violet-700 text-white rounded-lg text-xs font-semibold transition">閱讀此卷</button>
+        `;
+        const startIdx = currentBook.pages_list.indexOf(`${vol.start_page.toString().padStart(4, '0')}.json`);
+        card.onclick = () => {
+          currentVolume = vol;
+          currentPageIndex = startIdx !== -1 ? startIdx : 0;
+          
+          document.getElementById('volume-view').classList.add('hidden');
+          document.getElementById('reader-view').classList.remove('hidden');
+          document.getElementById('reader-book-title').innerText = currentBook.title;
+          document.getElementById('reader-vol-title').innerText = vol.title;
+          document.getElementById('vol-menu-btn').classList.remove('hidden');
+          loadPage();
+        };
+        grid.appendChild(card);
+      });
+    }
+
+    // Load Comic/Novel Page
+    async function loadPage() {
+      const file = currentBook.pages_list[currentPageIndex];
+      const pageNumStr = file.replace('.json', '');
+      
+      // Update UI displays
+      document.getElementById('page-display').innerText = `頁碼: ${pageNumStr} / ${currentBook.pages_list.length}`;
+      document.getElementById('page-display-b').innerText = `頁碼: ${pageNumStr} / ${currentBook.pages_list.length}`;
+      
+      // Disable btns
+      document.getElementById('prev-page-btn').disabled = currentPageIndex === 0;
+      document.getElementById('prev-page-btn-b').disabled = currentPageIndex === 0;
+      document.getElementById('next-page-btn').disabled = currentPageIndex >= currentBook.pages_list.length - 1;
+      document.getElementById('next-page-btn-b').disabled = currentPageIndex >= currentBook.pages_list.length - 1;
+      
+      // Volume Nav checks
+      if (currentBook.volumes && currentBook.volumes.length > 0) {
+        const curVolIdx = currentBook.volumes.indexOf(currentVolume);
+        document.getElementById('prev-vol-btn').disabled = curVolIdx <= 0;
+        document.getElementById('prev-vol-btn-b').disabled = curVolIdx <= 0;
+        document.getElementById('next-vol-btn').disabled = curVolIdx === -1 || curVolIdx >= currentBook.volumes.length - 1;
+        document.getElementById('next-vol-btn-b').disabled = curVolIdx === -1 || curVolIdx >= currentBook.volumes.length - 1;
+      } else {
+        document.getElementById('prev-vol-btn').disabled = true;
+        document.getElementById('prev-vol-btn-b').disabled = true;
+        document.getElementById('next-vol-btn').disabled = true;
+        document.getElementById('next-vol-btn-b').disabled = true;
+      }
+      
+      // Clear contents
+      document.getElementById('page-left').innerHTML = '<div class="text-xs text-gray-400">載入中...</div>';
+      document.getElementById('page-right').innerHTML = '';
+      
+      try {
+        const res = await sendRequest({
+          action: 'get_page',
+          book_id: currentBook.id,
+          page_file: file
+        });
+        
+        renderPageElements(res.page_elements, 'page-left');
+        
+        // Dual mode
+        if (isDualMode && currentPageIndex < currentBook.pages_list.length - 1) {
+          const nextFile = currentBook.pages_list[currentPageIndex + 1];
+          const nextRes = await sendRequest({
+            action: 'get_page',
+            book_id: currentBook.id,
+            page_file: nextFile
+          });
+          renderPageElements(nextRes.page_elements, 'page-right');
+          document.getElementById('page-right').classList.remove('hidden');
+        } else {
+          document.getElementById('page-right').classList.add('hidden');
+        }
+        
+      } catch (err) {
+        log(`讀取頁面出錯: ${err.message}`, 'error');
+        document.getElementById('page-left').innerHTML = `<div class="text-red-400 text-xs">讀取失敗: ${err.message}</div>`;
+      }
+      
+      // Scroll to top of reader
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+
+    function renderPageElements(elements, targetId) {
+      const container = document.getElementById(targetId);
+      container.innerHTML = '';
+      
+      if (!elements || elements.length === 0) {
+        container.innerHTML = '<div class="text-xs text-gray-500">此頁無內容</div>';
+        return;
+      }
+      
+      elements.forEach(el => {
+        if (el.type === 'image') {
+          const img = document.createElement('img');
+          img.src = el.src;
+          img.className = 'max-w-full max-h-[85vh] object-contain rounded';
+          img.style.position = 'relative';
+          img.style.zIndex = el.z_index;
+          container.appendChild(img);
+        } else if (el.type === 'text' || el.type === 'markdown') {
+          const div = document.createElement('div');
+          div.className = 'w-full prose prose-invert p-6 md:p-10 leading-relaxed overflow-x-hidden';
+          div.style.fontSize = `${el.font_size ? (parseFloat(el.font_size) * novelFontSize / 24.0) : novelFontSize}px`;
+          div.style.color = el.color || '#e0e0e0';
+          div.style.backgroundColor = el.bg_color || '#151515';
+          div.style.zIndex = el.z_index || 1;
+          div.innerText = el.content;
+          container.appendChild(div);
+        }
+      });
+    }
+
+    // Hook events
+    document.getElementById('connect-btn').onclick = () => {
+      const room = document.getElementById('room-input').value.trim();
+      const pass = document.getElementById('pass-input').value.trim();
+      if (!room || !pass) {
+        alert('請填寫 Room ID 與 Password');
+        return;
+      }
+      startConnection(room, pass);
+    };
+
+    document.getElementById('logout-btn').onclick = () => {
+      resetToLogin();
+    };
+
+    document.getElementById('search-input').oninput = () => {
+      renderLibrary();
+    };
+
+    // Back actions
+    document.getElementById('vol-back-btn').onclick = () => {
+      document.getElementById('volume-view').classList.add('hidden');
+      document.getElementById('library-view').classList.remove('hidden');
+    };
+
+    document.getElementById('reader-back-btn').onclick = () => {
+      document.getElementById('reader-view').classList.add('hidden');
+      if (currentBook.volumes && currentBook.volumes.length > 0) {
+        document.getElementById('volume-view').classList.remove('hidden');
+      } else {
+        document.getElementById('library-view').classList.remove('hidden');
+      }
+    };
+
+    document.getElementById('vol-menu-btn').onclick = () => {
+      document.getElementById('reader-view').classList.add('hidden');
+      document.getElementById('volume-view').classList.remove('hidden');
+    };
+
+    // Navigation triggers
+    function prevPage() {
+      if (currentPageIndex > 0) {
+        currentPageIndex -= isDualMode ? 2 : 1;
+        if (currentPageIndex < 0) currentPageIndex = 0;
+        loadPage();
+      }
+    }
+
+    function nextPage() {
+      if (currentPageIndex < currentBook.pages_list.length - 1) {
+        currentPageIndex += isDualMode ? 2 : 1;
+        if (currentPageIndex >= currentBook.pages_list.length) currentPageIndex = currentBook.pages_list.length - 1;
+        loadPage();
+      }
+    }
+
+    document.getElementById('prev-page-btn').onclick = prevPage;
+    document.getElementById('prev-page-btn-b').onclick = prevPage;
+    document.getElementById('next-page-btn').onclick = nextPage;
+    document.getElementById('next-page-btn-b').onclick = nextPage;
+
+    // Click zones
+    document.getElementById('click-left').onclick = prevPage;
+    document.getElementById('click-right').onclick = nextPage;
+
+    // Dual mode toggle
+    document.getElementById('dual-mode-btn').onclick = () => {
+      isDualMode = !isDualMode;
+      document.getElementById('dual-mode-btn').querySelector('span').innerText = isDualMode ? '雙頁模式' : '單頁模式';
+      loadPage();
+    };
+
+    // Font size adjuster
+    document.getElementById('font-size-slider').oninput = (e) => {
+      novelFontSize = parseInt(e.target.value);
+      document.getElementById('font-size-text').innerText = `字型大小: ${novelFontSize}px`;
+      loadPage();
+    };
+
+    // Volume jumps
+    function prevVolume() {
+      const idx = currentBook.volumes.indexOf(currentVolume);
+      if (idx > 0) {
+        const prevVol = currentBook.volumes[idx - 1];
+        const startIdx = currentBook.pages_list.indexOf(`${prevVol.start_page.toString().padStart(4, '0')}.json`);
+        currentVolume = prevVol;
+        currentPageIndex = startIdx !== -1 ? startIdx : 0;
+        document.getElementById('reader-vol-title').innerText = prevVol.title;
+        loadPage();
+      }
+    }
+
+    function nextVolume() {
+      const idx = currentBook.volumes.indexOf(currentVolume);
+      if (idx !== -1 && idx < currentBook.volumes.length - 1) {
+        const nextVol = currentBook.volumes[idx + 1];
+        const startIdx = currentBook.pages_list.indexOf(`${nextVol.start_page.toString().padStart(4, '0')}.json`);
+        currentVolume = nextVol;
+        currentPageIndex = startIdx !== -1 ? startIdx : 0;
+        document.getElementById('reader-vol-title').innerText = nextVol.title;
+        loadPage();
+      }
+    }
+
+    document.getElementById('prev-vol-btn').onclick = prevVolume;
+    document.getElementById('prev-vol-btn-b').onclick = prevVolume;
+    document.getElementById('next-vol-btn').onclick = nextVolume;
+    document.getElementById('next-vol-btn-b').onclick = nextVolume;
+
+    // Jump page
+    document.getElementById('jump-btn').onclick = () => {
+      const val = parseInt(document.getElementById('jump-input').value);
+      if (val > 0 && val <= currentBook.pages_list.length) {
+        currentPageIndex = val - 1;
+        loadPage();
+      } else {
+        alert('無效頁碼！');
+      }
+    };
+
+    // Suggestions submit
+    document.getElementById('suggest-btn').onclick = () => {
+      const val = document.getElementById('suggest-input').value.trim();
+      if (!val) {
+        alert('請填寫建議內容！');
+        return;
+      }
+      sendRequest({
+        action: 'submit_suggestion',
+        suggestion: val
+      }).then(res => {
+        if (res.success) {
+          alert('建議已順利提交！');
+          document.getElementById('suggest-input').value = '';
+        } else {
+          alert(`提交失敗: ${res.error}`);
+        }
+      }).catch(err => {
+        alert(`提交出錯: ${err.message}`);
+      });
+    };
+
+    // Auto load inputs from url params
+    window.onload = () => {
+      const params = new URLSearchParams(window.location.search);
+      const room = params.get('room') || params.get('room_id');
+      const pass = params.get('pass') || params.get('password');
+      if (room) document.getElementById('room-input').value = room.toUpperCase();
+      if (pass) document.getElementById('pass-input').value = pass;
+      
+      lucide.createIcons();
+    };
+  </script>
+</body>
+</html>
