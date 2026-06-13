@@ -228,7 +228,9 @@ TMP/
 raw/
 bank/
 !bank/spec.md
-script/
+script/*
+!script/patch_gh_pages_paths.py
+!script/mqtt_game_server_cli.py
 # assets symlinks
 assets/bank
 assets/extracted/
