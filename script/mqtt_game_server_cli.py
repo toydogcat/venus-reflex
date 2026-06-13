@@ -5,6 +5,10 @@ import time
 import hashlib
 import json
 import threading
+import base64
+import zipfile
+import re
+from pathlib import Path
 import paho.mqtt.client as mqtt
 from paho.mqtt.enums import CallbackAPIVersion
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -23,18 +27,213 @@ logs = []
 logs_lock = threading.Lock()
 messages_received = 0
 
+# 路徑設定
+SCRIPT_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = SCRIPT_DIR.parent
+BANK_DIR = PROJECT_ROOT / "bank"
+
+# 自然排序函數
+def natural_sort_key(s: str):
+    return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', s)]
+
+# 轉換圖片檔案為 Base64 Data URL
+def file_to_base64_data_url(file_path: Path) -> str:
+    suffix = file_path.suffix.lower()
+    mime_type = "image/jpeg"
+    if suffix == ".png":
+        mime_type = "image/png"
+    elif suffix == ".webp":
+        mime_type = "image/webp"
+    elif suffix == ".gif":
+        mime_type = "image/gif"
+    
+    try:
+        with open(file_path, "rb") as f:
+            encoded = base64.b64encode(f.read()).decode("utf-8")
+            return f"data:{mime_type};base64,{encoded}"
+    except Exception as e:
+        log_message(f"讀取圖片 {file_path} 失敗: {e}")
+        return ""
+
+# 轉換 ZIP 壓縮檔內的圖片為 Base64 Data URL
+def zip_entry_to_base64_data_url(zip_path: Path, entry_name: str) -> str:
+    suffix = Path(entry_name).suffix.lower()
+    mime_type = "image/jpeg"
+    if suffix == ".png":
+        mime_type = "image/png"
+    elif suffix == ".webp":
+        mime_type = "image/webp"
+    elif suffix == ".gif":
+        mime_type = "image/gif"
+        
+    try:
+        with zipfile.ZipFile(zip_path, "r") as z:
+            with z.open(entry_name) as f:
+                encoded = base64.b64encode(f.read()).decode("utf-8")
+                return f"data:{mime_type};base64,{encoded}"
+    except Exception as e:
+        log_message(f"讀取壓縮檔項目 {entry_name} 失敗: {e}")
+        return ""
+
+# 載入本機書籍清單與分類排序 (對 Cover 做 Base64 轉換)
+def _blocking_load_books() -> tuple[list, list]:
+    books_list = []
+    cat_order = []
+    
+    cat_file = BANK_DIR / "categories.json"
+    if cat_file.exists():
+        try:
+            with open(cat_file, 'r', encoding='utf-8') as f:
+                cat_data = json.load(f)
+                cat_order = [c["name"] for c in sorted(cat_data, key=lambda x: x.get("order", 99))]
+        except Exception as e:
+            log_message(f"讀取分類檔失敗: {e}")
+            
+    if BANK_DIR.exists():
+        # 掃描資料夾書籍
+        for manifest_path in BANK_DIR.rglob("manifest.json"):
+            if manifest_path.parent == BANK_DIR: continue
+            book_dir = manifest_path.parent
+            try:
+                with open(manifest_path, 'r', encoding='utf-8') as f:
+                    manifest = json.load(f)
+                    manifest["is_zip"] = False
+                    manifest["rel_path"] = str(book_dir.relative_to(BANK_DIR))
+                    
+                    # 掃描頁面列表
+                    pages_path = book_dir / "pages"
+                    pages_list = []
+                    if pages_path.exists():
+                        pages_list = sorted([f.name for f in pages_path.glob("*.json")], key=natural_sort_key)
+                    manifest["pages_list"] = pages_list
+                    
+                    # 尋找封面
+                    cover_file = ""
+                    if pages_path.exists():
+                        first_page = pages_path / "0001.json"
+                        if first_page.exists():
+                            with open(first_page, 'r') as pf:
+                                page_data = json.load(pf)
+                                for el in page_data.get("elements", []):
+                                    if el.get("type") == "image":
+                                        cover_file = Path(el["src"]).name
+                                        break
+                    if not cover_file:
+                        assets_path = book_dir / "assets"
+                        if assets_path.exists():
+                            all_imgs = sorted([img_f.name for img_f in assets_path.iterdir() if img_f.suffix.lower() in ('.jpg', '.jpeg', '.png', '.gif', '.webp')], key=natural_sort_key)
+                            if all_imgs: cover_file = all_imgs[0]
+                    
+                    cover_path = book_dir / "assets" / cover_file
+                    manifest["cover_src"] = file_to_base64_data_url(cover_path) if cover_file and cover_path.exists() else ""
+                    books_list.append(manifest)
+            except Exception as e:
+                log_message(f"載入書籍失敗 {book_dir}: {e}")
+
+        # 掃描 ZIP 壓縮書籍
+        for zip_path in BANK_DIR.rglob("*.zip"):
+            try:
+                with zipfile.ZipFile(zip_path, 'r') as z:
+                    manifest_name = next((n for n in z.namelist() if n.endswith('manifest.json')), None)
+                    if not manifest_name: continue
+                    
+                    with z.open(manifest_name) as f:
+                        manifest = json.loads(f.read().decode('utf-8'))
+                        
+                    manifest["is_zip"] = True
+                    manifest["zip_path"] = str(zip_path)
+                    manifest["zip_internal_prefix"] = str(Path(manifest_name).parent) if '/' in manifest_name else ""
+                    manifest["rel_path"] = str(zip_path.relative_to(BANK_DIR))
+                    
+                    # 掃描頁面列表
+                    prefix = manifest["zip_internal_prefix"]
+                    pages_dir = os.path.join(prefix, "pages")
+                    pages_list = sorted([Path(n).name for n in z.namelist() if n.startswith(pages_dir) and n.endswith('.json')], key=natural_sort_key)
+                    manifest["pages_list"] = pages_list
+                    
+                    # 尋找封面
+                    cover_internal_path = ""
+                    first_page_name = next((n for n in z.namelist() if n.endswith('pages/0001.json')), None)
+                    if first_page_name:
+                        try:
+                            with z.open(first_page_name) as pf:
+                                page_data = json.loads(pf.read().decode('utf-8'))
+                                for el in page_data.get("elements", []):
+                                    if el.get("type") == "image":
+                                        prefix = manifest["zip_internal_prefix"]
+                                        cover_internal_path = os.path.normpath(os.path.join(prefix, el["src"])).lstrip('./')
+                                        break
+                        except: pass
+                    
+                    if not cover_internal_path:
+                        try:
+                            prefix = manifest["zip_internal_prefix"]
+                            assets_prefix = os.path.join(prefix, "assets").lstrip('./')
+                            img_entries = [n for n in z.namelist() if n.startswith(assets_prefix) and n.lower().endswith(('.jpg', '.jpeg', '.png', '.webp'))]
+                            if img_entries:
+                                cover_internal_path = sorted(img_entries, key=natural_sort_key)[0]
+                        except: pass
+                    
+                    if cover_internal_path:
+                        manifest["cover_src"] = zip_entry_to_base64_data_url(zip_path, cover_internal_path)
+                    else:
+                        manifest["cover_src"] = ""
+                    books_list.append(manifest)
+            except Exception as e:
+                log_message(f"載入壓縮檔書籍失敗 {zip_path}: {e}")
+                
+    sorted_books = sorted(books_list, key=lambda x: natural_sort_key(x.get("title", "")))
+    return sorted_books, cat_order
+
+# 載入頁面並將頁面內所有圖片轉為 Base64 Data URL
+def load_page_elements_base64(book: dict, page_file: str) -> list:
+    elements = []
+    try:
+        if book.get("is_zip"):
+            zip_path = Path(book["zip_path"])
+            with zipfile.ZipFile(zip_path, 'r') as z:
+                prefix = book["zip_internal_prefix"]
+                internal_path = os.path.normpath(os.path.join(prefix, "pages", page_file)).lstrip('./')
+                data = json.loads(z.read(internal_path).decode('utf-8'))
+                elements = data.get("elements", [])
+                
+                namelist = set(z.namelist())
+                
+                for el in elements:
+                    if el.get("type") == "image":
+                        src = el.get("src", "")
+                        img_internal_path = os.path.normpath(os.path.join(prefix, "pages", src)).lstrip('./')
+                        if img_internal_path not in namelist:
+                            img_internal_path = os.path.normpath(os.path.join(prefix, "assets", Path(src).name)).lstrip('./')
+                        
+                        el["src"] = zip_entry_to_base64_data_url(zip_path, img_internal_path)
+        else:
+            book_dir = BANK_DIR / book["rel_path"]
+            page_path = book_dir / "pages" / page_file
+            with open(page_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            elements = data.get("elements", [])
+            
+            for el in elements:
+                if el.get("type") == "image":
+                    src = el.get("src", "")
+                    img_path = book_dir / "pages" / src
+                    if not img_path.exists():
+                        img_path = book_dir / "assets" / Path(src).name
+                    
+                    el["src"] = file_to_base64_data_url(img_path) if img_path.exists() else ""
+    except Exception as e:
+        log_message(f"讀取頁面失敗: {e}")
+    
+    return elements
+
 # 金鑰與主題計算
 def get_crypto_params(room_id, password):
-    # 用密碼做 SHA-256 產生 32-byte (256-bit) AES 金鑰
     key = hashlib.sha256(password.encode('utf-8')).digest()
-    
-    # 用房號 + 密碼產生 Topic 的 Hash，防外人窺探主題
     topic_raw = f"{room_id.upper()}_{password}"
     topic_hash = hashlib.sha256(topic_raw.encode('utf-8')).hexdigest()[:16]
-    
     c2s_topic = f"vreflex/rooms/{topic_hash}/c2s"
     s2c_topic = f"vreflex/rooms/{topic_hash}/s2c"
-    
     return key, c2s_topic, s2c_topic
 
 def log_message(text):
@@ -65,8 +264,7 @@ def decrypt_payload(payload, key):
         ciphertext = payload[12:]
         plaintext = aesgcm.decrypt(nonce, ciphertext, None)
         return json.loads(plaintext.decode('utf-8'))
-    except Exception as e:
-        # 解密失敗通常表示密碼錯誤或是未加密的垃圾資料
+    except Exception:
         return None
 
 # MQTT 回呼函數
@@ -87,22 +285,66 @@ def on_message(client, userdata, msg):
     messages_received += 1
     
     key, c2s_topic, s2c_topic = get_crypto_params(ROOM_ID, PASSWORD)
-    
-    # 嘗試用當前密碼解密
     decrypted = decrypt_payload(msg.payload, key)
     
     if decrypted:
-        log_message(f"收到加密訊息 [解密成功]: {decrypted}")
-        # 在此處可以加入自動遊戲邏輯回覆
-        # 範例：若收到 {action: ping}，自動回覆 {action: pong}
-        if decrypted.get("action") == "ping":
-            reply = {"action": "pong", "sender": "PythonServer", "timestamp": time.time()}
+        action = decrypted.get("action")
+        req_id = decrypted.get("request_id")
+        log_message(f"收到加密訊息 [解密成功]: action={action}, req_id={req_id}")
+        
+        if action == "ping":
+            reply = {"action": "pong", "request_id": req_id, "sender": "PythonServer", "timestamp": time.time()}
+            send_game_message(reply)
+            
+        elif action == "get_library":
+            books, cat_order = _blocking_load_books()
+            reply = {
+                "action": "library_response",
+                "request_id": req_id,
+                "books": books,
+                "category_order": cat_order
+            }
+            send_game_message(reply)
+            
+        elif action == "get_page":
+            book_id = decrypted.get("book_id")
+            page_file = decrypted.get("page_file")
+            
+            books, _ = _blocking_load_books()
+            book = next((b for b in books if str(b.get("id")) == str(book_id)), None)
+            
+            elements = []
+            if book:
+                elements = load_page_elements_base64(book, page_file)
+                
+            reply = {
+                "action": "page_response",
+                "request_id": req_id,
+                "page_elements": elements
+            }
+            send_game_message(reply)
+            
+        elif action == "submit_suggestion":
+            suggestion = decrypted.get("suggestion")
+            s_file = BANK_DIR / "suggestions.json"
+            try:
+                suggestions = []
+                if s_file.exists():
+                    with open(s_file, 'r', encoding='utf-8') as f:
+                        suggestions = json.load(f)
+                suggestions.append(suggestion)
+                with open(s_file, 'w', encoding='utf-8') as f:
+                    json.dump(suggestions, f, ensure_ascii=False, indent=2)
+                log_message(f"已儲存建議至 suggestions.json: {suggestion}")
+                reply = {"action": "suggestion_response", "request_id": req_id, "success": True}
+            except Exception as e:
+                log_message(f"儲存建議失敗: {e}")
+                reply = {"action": "suggestion_response", "request_id": req_id, "success": False, "error": str(e)}
             send_game_message(reply)
     else:
-        # 嘗試以純文字解碼 (未加密的資料)
         try:
             raw_text = msg.payload.decode('utf-8')
-            log_message(f"收到未加密訊息 (可能是密碼不符或測試訊息): {raw_text}")
+            log_message(f"收到未加密訊息 (可能是密碼不符): {raw_text}")
         except:
             log_message(f"收到無法解析的二進制訊息 (長度: {len(msg.payload)} bytes)")
 
@@ -118,7 +360,6 @@ def send_game_message(data_dict):
     
     if encrypted:
         mqtt_client.publish(s2c_topic, encrypted)
-        log_message(f"已廣播加密訊息至 {s2c_topic}: {data_dict}")
         return True
     return False
 
@@ -132,13 +373,11 @@ def start_server():
     is_running = True
     log_message(f"正在連線至 {BROKER_HOST}:{BROKER_PORT}...")
     
-    # 使用 paho-mqtt v2.x.x
     mqtt_client = mqtt.Client(callback_api_version=CallbackAPIVersion.VERSION2)
     mqtt_client.on_connect = on_connect
     mqtt_client.on_disconnect = on_disconnect
     mqtt_client.on_message = on_message
     
-    # 設定連線參數
     mqtt_client.connect(BROKER_HOST, BROKER_PORT, 60)
     
     def loop_runner():

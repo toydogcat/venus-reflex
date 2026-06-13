@@ -12,6 +12,10 @@ from concurrent.futures import ThreadPoolExecutor
 from fastapi.responses import Response
 from starlette.requests import Request
 from rxconfig import config
+import hashlib
+import paho.mqtt.client as mqtt
+from paho.mqtt.enums import CallbackAPIVersion
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 # Paths
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -149,6 +153,21 @@ class State(rx.State):
     expanded_categories: Set[str] = set()
     expanded_subcategories: Set[str] = set()
     
+    # Login & MQTT connection state
+    is_logged_in: bool = False
+    is_mqtt_mode: bool = False
+    room_id_input: str = ""
+    password_input: str = ""
+    connection_status: str = ""
+    is_connecting: bool = False
+    
+    # Private MQTT fields (not synchronized to client)
+    _mqtt_client: Any = None
+    _mqtt_key: bytes = b""
+    _mqtt_c2s: str = ""
+    _mqtt_s2c: str = ""
+    _mqtt_futures: Dict[str, Any] = {}
+    
     # ... (skipping unchanged Reader/BGM/Volume state vars)
     selected_book_id: str = ""
     current_book_info: Dict[str, Any] = {}
@@ -171,18 +190,188 @@ class State(rx.State):
     selected_volume_index: int = -1
     volume_search_query: str = ""
 
-    async def load_books(self):
-        # ... (same as before)
-        global _library_cache, _category_cache
+    async def _send_mqtt_request(self, action: str, payload: dict, expected_response_action: str, timeout: float = 8.0) -> Optional[dict]:
+        if not self._mqtt_client or not self._mqtt_key:
+            return None
+            
+        req_id = os.urandom(8).hex()
+        payload["action"] = action
+        payload["request_id"] = req_id
         
-        # Check global cache first
+        # Encrypt the payload
+        aesgcm = AESGCM(self._mqtt_key)
+        nonce = os.urandom(12)
+        plaintext = json.dumps(payload).encode('utf-8')
+        ciphertext = aesgcm.encrypt(nonce, plaintext, None)
+        encrypted = nonce + ciphertext
+        
+        # Register future
+        loop = asyncio.get_running_loop()
+        fut = loop.create_future()
+        
+        self._mqtt_futures[req_id] = fut
+        
+        try:
+            # Publish request
+            self._mqtt_client.publish(self._mqtt_c2s, encrypted)
+            
+            # Wait for future with timeout
+            response = await asyncio.wait_for(fut, timeout=timeout)
+            return response
+        except asyncio.TimeoutError:
+            print(f"MQTT request {action} timed out.")
+            return None
+        finally:
+            if req_id in self._mqtt_futures:
+                del self._mqtt_futures[req_id]
+
+    def _on_mqtt_message(self, client, userdata, msg):
+        if not self._mqtt_key:
+            return
+            
+        payload = msg.payload
+        if len(payload) <= 12:
+            return
+            
+        try:
+            aesgcm = AESGCM(self._mqtt_key)
+            nonce = payload[:12]
+            ciphertext = payload[12:]
+            plaintext = aesgcm.decrypt(nonce, ciphertext, None)
+            decrypted = json.loads(plaintext.decode('utf-8'))
+            
+            req_id = decrypted.get("request_id")
+            if req_id and req_id in self._mqtt_futures:
+                fut = self._mqtt_futures[req_id]
+                loop = fut.get_loop()
+                if not fut.done():
+                    loop.call_soon_threadsafe(fut.set_result, decrypted)
+        except Exception as e:
+            print(f"Error decrypting incoming message: {e}")
+
+    async def connect_to_mqtt_server(self):
+        room = self.room_id_input.strip().upper()
+        password = self.password_input.strip()
+        
+        if not room or not password:
+            self.connection_status = "Please enter both Room ID and Password."
+            return
+            
+        self.is_connecting = True
+        self.connection_status = f"Connecting to Room {room}..."
+        yield # Force UI update
+        
+        # Calculate key and topics
+        key = hashlib.sha256(password.encode('utf-8')).digest()
+        topic_raw = f"{room}_{password}"
+        topic_hash = hashlib.sha256(topic_raw.encode('utf-8')).hexdigest()[:16]
+        c2s_topic = f"vreflex/rooms/{topic_hash}/c2s"
+        s2c_topic = f"vreflex/rooms/{topic_hash}/s2c"
+        
+        try:
+            # Initialize MQTT client
+            client = mqtt.Client(callback_api_version=CallbackAPIVersion.VERSION2)
+            client.on_message = self._on_mqtt_message
+            
+            loop = asyncio.get_running_loop()
+            conn_future = loop.create_future()
+            
+            def on_connect(client, userdata, flags, reason_code, properties):
+                if reason_code == 0:
+                    loop.call_soon_threadsafe(conn_future.set_result, True)
+                else:
+                    loop.call_soon_threadsafe(conn_future.set_result, Exception(f"Connection failed with code {reason_code}"))
+                    
+            client.on_connect = on_connect
+            
+            # Connect synchronously in executor thread
+            await loop.run_in_executor(
+                None,
+                lambda: client.connect("broker.emqx.io", 1883, 60)
+            )
+            
+            client.loop_start()
+            
+            # Wait for connection success with timeout
+            try:
+                await asyncio.wait_for(conn_future, timeout=5.0)
+                client.subscribe(s2c_topic)
+                
+                self._mqtt_client = client
+                self._mqtt_key = key
+                self._mqtt_c2s = c2s_topic
+                self._mqtt_s2c = s2c_topic
+                
+                self.connection_status = "Fetching library catalog..."
+                yield
+                
+                # Fetch books library
+                resp = await self._send_mqtt_request("get_library", {}, "library_response", timeout=6.0)
+                if resp and resp.get("action") == "library_response":
+                    self.all_books = resp.get("books", [])
+                    self.category_order = resp.get("category_order", [])
+                    self.is_logged_in = True
+                    self.is_mqtt_mode = True
+                    self.connection_status = ""
+                else:
+                    client.loop_stop()
+                    client.disconnect()
+                    self.connection_status = "Server timeout. Make sure the Python CLI server is running."
+            except asyncio.TimeoutError:
+                client.loop_stop()
+                client.disconnect()
+                self.connection_status = "Connection timeout. Please check your room or password."
+            except Exception as e:
+                client.loop_stop()
+                client.disconnect()
+                self.connection_status = f"Connection error: {e}"
+        except Exception as e:
+            self.connection_status = f"Failed to connect: {e}"
+        finally:
+            self.is_connecting = False
+
+    async def enter_local_mode(self):
+        self.is_logged_in = True
+        self.is_mqtt_mode = False
+        self.connection_status = ""
+        yield self.load_books()
+
+    def logout(self):
+        if self._mqtt_client:
+            try:
+                self._mqtt_client.loop_stop()
+                self._mqtt_client.disconnect()
+            except:
+                pass
+        self._mqtt_client = None
+        self._mqtt_key = b""
+        self._mqtt_c2s = ""
+        self._mqtt_s2c = ""
+        self._mqtt_futures.clear()
+        self.is_logged_in = False
+        self.is_mqtt_mode = False
+        self.room_id_input = ""
+        self.password_input = ""
+        self.all_books = []
+        self.category_order = []
+
+    async def load_books(self):
+        if not self.is_logged_in:
+            return
+        if self.is_mqtt_mode:
+            resp = await self._send_mqtt_request("get_library", {}, "library_response")
+            if resp and resp.get("action") == "library_response":
+                self.all_books = resp.get("books", [])
+                self.category_order = resp.get("category_order", [])
+            return
+
+        global _library_cache, _category_cache
         with _library_cache_lock:
             if _library_cache:
                 self.all_books = _library_cache
                 self.category_order = _category_cache
                 return
         
-        # Scan bank in executor asynchronously
         loop = asyncio.get_running_loop()
         books, cat_order = await loop.run_in_executor(_io_executor, _blocking_load_books)
         
@@ -246,24 +435,27 @@ class State(rx.State):
         self.current_book_info = book
         print(f"Selecting book: {book.get('title')}, is_zip: {book.get('is_zip')}")
         
-        loop = asyncio.get_running_loop()
-        if book.get("is_zip"):
-            def _list_zip_pages():
-                with zipfile.ZipFile(book["zip_path"], 'r') as z:
-                    prefix = book["zip_internal_prefix"]
-                    pages_dir = os.path.join(prefix, "pages")
-                    return sorted([Path(n).name for n in z.namelist() if n.startswith(pages_dir) and n.endswith('.json')], key=natural_sort_key)
-            self.pages_list = await loop.run_in_executor(_io_executor, _list_zip_pages)
+        if self.is_mqtt_mode:
+            self.pages_list = book.get("pages_list", [])
         else:
-            book_path = BANK_DIR / book["rel_path"]
-            pages_dir = book_path / "pages"
-            if pages_dir.exists():
-                def _list_pages():
-                    return sorted([f.name for f in pages_dir.glob("*.json")], key=natural_sort_key)
-                self.pages_list = await loop.run_in_executor(_io_executor, _list_pages)
+            loop = asyncio.get_running_loop()
+            if book.get("is_zip"):
+                def _list_zip_pages():
+                    with zipfile.ZipFile(book["zip_path"], 'r') as z:
+                        prefix = book["zip_internal_prefix"]
+                        pages_dir = os.path.join(prefix, "pages")
+                        return sorted([Path(n).name for n in z.namelist() if n.startswith(pages_dir) and n.endswith('.json')], key=natural_sort_key)
+                self.pages_list = await loop.run_in_executor(_io_executor, _list_zip_pages)
             else:
-                self.pages_list = []
-                print(f"Pages directory not found: {pages_dir}")
+                book_path = BANK_DIR / book["rel_path"]
+                pages_dir = book_path / "pages"
+                if pages_dir.exists():
+                    def _list_pages():
+                        return sorted([f.name for f in pages_dir.glob("*.json")], key=natural_sort_key)
+                    self.pages_list = await loop.run_in_executor(_io_executor, _list_pages)
+                else:
+                    self.pages_list = []
+                    print(f"Pages directory not found: {pages_dir}")
         
         self.current_page_idx = 0
         self.selected_volume_index = -1
@@ -275,8 +467,18 @@ class State(rx.State):
     async def _load_page_json(self, idx: int) -> List[Dict[str, Any]]:
         if 0 <= idx < len(self.pages_list):
             page_file = self.pages_list[idx]
-            loop = asyncio.get_running_loop()
             
+            if self.is_mqtt_mode:
+                resp = await self._send_mqtt_request(
+                    "get_page",
+                    {"book_id": self.current_book_info.get("id"), "page_file": page_file},
+                    "page_response"
+                )
+                if resp and resp.get("action") == "page_response":
+                    return resp.get("page_elements", [])
+                return []
+                
+            loop = asyncio.get_running_loop()
             try:
                 if self.current_book_info.get("is_zip"):
                     def _read_zip():
@@ -418,6 +620,12 @@ class State(rx.State):
     def set_suggestion_text(self, text: str):
         self.suggestion_text = text
 
+    def set_room_id_input(self, val: str):
+        self.room_id_input = val
+
+    def set_password_input(self, val: str):
+        self.password_input = val
+
     def set_jump_page_input(self, val: str):
         self.jump_page_input = val
 
@@ -437,6 +645,18 @@ class State(rx.State):
         if not self.selected_book_id or not self.pages_list: return
         suggestion = {"book_id": self.selected_book_id, "book_title": self.current_book_info.get("title"), "page_index": self.current_page_idx, "page_file": self.pages_list[self.current_page_idx], "suggestion": self.suggestion_text}
         
+        if self.is_mqtt_mode:
+            resp = await self._send_mqtt_request(
+                "submit_suggestion",
+                {"suggestion": suggestion},
+                "suggestion_response"
+            )
+            if resp and resp.get("success"):
+                self.suggestion_text = ""
+                return rx.toast("Suggestion saved to remote server!")
+            else:
+                return rx.toast("Failed to save suggestion to remote server.")
+                
         async with _suggestion_lock:
             suggestions = []
             if SUGGESTIONS_FILE.exists():
@@ -535,9 +755,13 @@ def render_element(el: Any, book_info: Any, novel_font_size: Any) -> rx.Componen
     )
 
     img_src = rx.cond(
-        book_info["is_zip"],
-        zip_img_src,
-        dir_img_src
+        el["src"].to(str).startswith("data:"),
+        el["src"].to(str),
+        rx.cond(
+            book_info["is_zip"],
+            zip_img_src,
+            dir_img_src
+        )
     )
     
     return rx.match(
@@ -619,68 +843,226 @@ def navigation_controls(show_jump: bool = True) -> rx.Component:
         width="100%"
     )
 
-def index() -> rx.Component:
-    return rx.container(
+def login_page() -> rx.Component:
+    return rx.center(
         rx.vstack(
-            rx.hstack(rx.heading("Venus Reader", size="9"), rx.spacer(), bgm_controls(), width="100%", padding_y="6"),
-            rx.debounce_input(
-                rx.input(
-                    placeholder="Search title, author or category...",
-                    width="100%",
-                    size="3",
-                    margin_bottom="4",
-                    on_change=State.set_search_query,
+            # Premium Glow Background Card (Glassmorphism)
+            rx.vstack(
+                # Title & Logo
+                rx.vstack(
+                    rx.heading(
+                        "Venus Reader",
+                        size="9",
+                        weight="bold",
+                        background_image="linear-gradient(135deg, #FF007F, #7F00FF)",
+                        background_clip="text",
+                        color="transparent",
+                        margin_bottom="1",
+                    ),
+                    rx.text("Private Matchmaking Connection Panel", size="2", color="#aaa", text_transform="uppercase", letter_spacing="2px"),
+                    align_items="center",
+                    spacing="1",
+                    margin_bottom="6",
                 ),
-                debounce_timeout=300,
-            ),
-            rx.foreach(
-                State.filtered_categories,
-                lambda main_cat: rx.vstack(
-                    rx.hstack(
-                        rx.heading(main_cat[0], size="6", border_left="4px solid var(--accent-9)", padding_left="3"),
-                        rx.spacer(),
-                        rx.button(rx.cond(State.expanded_categories.contains(main_cat[0]), rx.icon("chevron-up"), rx.icon("chevron-down")), on_click=lambda: State.toggle_category(main_cat[0]), variant="ghost", size="1"),
-                        on_click=lambda: State.toggle_category(main_cat[0]),
-                        width="100%", cursor="pointer", padding_y="2"
+                
+                # Room ID Input
+                rx.vstack(
+                    rx.text("Room ID", size="2", weight="medium", color="#ccc"),
+                    rx.input(
+                        placeholder="e.g. 5S8A2",
+                        value=State.room_id_input,
+                        on_change=State.set_room_id_input,
+                        size="3",
+                        width="100%",
+                        style={
+                            "background": "rgba(255, 255, 255, 0.05)",
+                            "border": "1px solid rgba(255, 255, 255, 0.1)",
+                            "color": "#fff",
+                        }
                     ),
-                    rx.cond(
-                        State.expanded_categories.contains(main_cat[0]),
-                        rx.vstack(
-                            rx.foreach(
-                                main_cat[1],
-                                lambda sub_cat: rx.vstack(
-                                    # Sub-category Header (if name is not empty)
-                                    rx.cond(
-                                        sub_cat[0] != "",
-                                        rx.hstack(
-                                            rx.heading(sub_cat[0], size="4", color_scheme="gray", margin_left="4"),
-                                            rx.spacer(),
-                                            rx.button(
-                                                rx.cond(State.expanded_subcategories.contains(main_cat[0] + "/" + sub_cat[0]), rx.icon("minus"), rx.icon("plus")),
-                                                variant="ghost", size="1"
-                                            ),
-                                            on_click=lambda: State.toggle_subcategory(main_cat[0] + "/" + sub_cat[0]),
-                                            width="100%", cursor="pointer", padding_y="1", margin_top="2"
-                                        )
-                                    ),
-                                    # Books (show if no subcategory name OR if expanded)
-                                    rx.cond(
-                                        (sub_cat[0] == "") | State.expanded_subcategories.contains(main_cat[0] + "/" + sub_cat[0]),
-                                        rx.flex(rx.foreach(sub_cat[1], book_card), wrap="wrap", spacing="5", justify="start", width="100%", padding_y="4", padding_left=rx.cond(sub_cat[0] != "", "8", "0"))
-                                    ),
-                                    align_items="start", width="100%"
-                                )
-                            ),
-                            width="100%"
-                        )
+                    align_items="start",
+                    width="100%",
+                    spacing="1",
+                ),
+                
+                # Password Input
+                rx.vstack(
+                    rx.text("Password", size="2", weight="medium", color="#ccc"),
+                    rx.input(
+                        placeholder="••••••••",
+                        type="password",
+                        value=State.password_input,
+                        on_change=State.set_password_input,
+                        size="3",
+                        width="100%",
+                        style={
+                            "background": "rgba(255, 255, 255, 0.05)",
+                            "border": "1px solid rgba(255, 255, 255, 0.1)",
+                            "color": "#fff",
+                        }
                     ),
-                    align_items="start", width="100%"
-                )
+                    align_items="start",
+                    width="100%",
+                    spacing="1",
+                    margin_top="3",
+                ),
+                
+                # Status Alert if any
+                rx.cond(
+                    State.connection_status != "",
+                    rx.box(
+                        rx.hstack(
+                            rx.icon("info", size=18, color="#ff4a9a"),
+                            rx.text(State.connection_status, size="2", color="#ff4a9a", weight="medium"),
+                            spacing="2",
+                            align_items="center",
+                        ),
+                        width="100%",
+                        padding="3",
+                        background_color="rgba(255, 74, 154, 0.1)",
+                        border="1px solid rgba(255, 74, 154, 0.2)",
+                        border_radius="md",
+                        margin_top="4",
+                    )
+                ),
+                
+                # Action Buttons
+                rx.button(
+                    rx.cond(State.is_connecting, "Connecting...", "Connect via MQTT"),
+                    on_click=State.connect_to_mqtt_server,
+                    size="3",
+                    width="100%",
+                    color_scheme="pink",
+                    variant="solid",
+                    margin_top="6",
+                    loading=State.is_connecting,
+                    style={
+                        "background": "linear-gradient(135deg, #FF007F, #7F00FF)",
+                        "box-shadow": "0 4px 15px rgba(255, 0, 127, 0.4)",
+                        "_hover": {
+                            "transform": "translateY(-1px)",
+                            "box-shadow": "0 6px 20px rgba(255, 0, 127, 0.6)",
+                        },
+                        "transition": "all 0.2s ease-in-out",
+                    }
+                ),
+                
+                rx.hstack(
+                    rx.divider(style={"border-color": "rgba(255,255,255,0.1)"}),
+                    rx.text("OR", size="1", color="#666", padding_x="2"),
+                    rx.divider(style={"border-color": "rgba(255,255,255,0.1)"}),
+                    width="100%",
+                    align_items="center",
+                    margin_y="4",
+                ),
+                
+                rx.button(
+                    "Local Mode (Offline)",
+                    on_click=State.enter_local_mode,
+                    size="3",
+                    width="100%",
+                    color_scheme="gray",
+                    variant="outline",
+                    style={
+                        "border": "1px solid rgba(255, 255, 255, 0.2)",
+                        "color": "#fff",
+                        "_hover": {
+                            "background": "rgba(255,255,255,0.05)",
+                        }
+                    }
+                ),
+                
+                width="100%",
+                padding="8",
+                background="rgba(20, 20, 20, 0.6)",
+                backdrop_filter="blur(16px)",
+                border="1px solid rgba(255, 255, 255, 0.08)",
+                border_radius="24px",
+                box_shadow="0 20px 40px rgba(0,0,0,0.5)",
             ),
-            rx.cond(State.filtered_categories.length() == 0, rx.center(rx.text("No results found.", size="4", color_scheme="gray"), width="100%", padding="20")),
-            spacing="5", padding="5", width="100%",
+            width="100%",
+            max_width="450px",
+            padding="4",
         ),
-        on_mount=State.load_books
+        width="100vw",
+        height="100vh",
+        background="radial-gradient(circle at top right, #1a0b2e, #0a0515)",
+        overflow="hidden",
+    )
+
+def index() -> rx.Component:
+    return rx.cond(
+        State.is_logged_in,
+        rx.container(
+            rx.vstack(
+                rx.hstack(
+                    rx.heading("Venus Reader", size="9"),
+                    rx.spacer(),
+                    rx.button("Logout", on_click=State.logout, variant="soft", color_scheme="red"),
+                    bgm_controls(),
+                    width="100%",
+                    padding_y="6"
+                ),
+                rx.debounce_input(
+                    rx.input(
+                        placeholder="Search title, author or category...",
+                        width="100%",
+                        size="3",
+                        margin_bottom="4",
+                        on_change=State.set_search_query,
+                    ),
+                    debounce_timeout=300,
+                ),
+                rx.foreach(
+                    State.filtered_categories,
+                    lambda main_cat: rx.vstack(
+                        rx.hstack(
+                            rx.heading(main_cat[0], size="6", border_left="4px solid var(--accent-9)", padding_left="3"),
+                            rx.spacer(),
+                            rx.button(rx.cond(State.expanded_categories.contains(main_cat[0]), rx.icon("chevron-up"), rx.icon("chevron-down")), on_click=lambda: State.toggle_category(main_cat[0]), variant="ghost", size="1"),
+                            on_click=lambda: State.toggle_category(main_cat[0]),
+                            width="100%", cursor="pointer", padding_y="2"
+                        ),
+                        rx.cond(
+                            State.expanded_categories.contains(main_cat[0]),
+                            rx.vstack(
+                                rx.foreach(
+                                    main_cat[1],
+                                    lambda sub_cat: rx.vstack(
+                                        # Sub-category Header (if name is not empty)
+                                        rx.cond(
+                                            sub_cat[0] != "",
+                                            rx.hstack(
+                                                rx.heading(sub_cat[0], size="4", color_scheme="gray", margin_left="4"),
+                                                rx.spacer(),
+                                                rx.button(
+                                                    rx.cond(State.expanded_subcategories.contains(main_cat[0] + "/" + sub_cat[0]), rx.icon("minus"), rx.icon("plus")),
+                                                    variant="ghost", size="1"
+                                                ),
+                                                on_click=lambda: State.toggle_subcategory(main_cat[0] + "/" + sub_cat[0]),
+                                                width="100%", cursor="pointer", padding_y="1", margin_top="2"
+                                            )
+                                        ),
+                                        # Books (show if no subcategory name OR if expanded)
+                                        rx.cond(
+                                            (sub_cat[0] == "") | State.expanded_subcategories.contains(main_cat[0] + "/" + sub_cat[0]),
+                                            rx.flex(rx.foreach(sub_cat[1], book_card), wrap="wrap", spacing="5", justify="start", width="100%", padding_y="4", padding_left=rx.cond(sub_cat[0] != "", "8", "0"))
+                                        ),
+                                        align_items="start", width="100%"
+                                    )
+                                ),
+                                width="100%"
+                            )
+                        ),
+                        align_items="start", width="100%"
+                    )
+                ),
+                rx.cond(State.filtered_categories.length() == 0, rx.center(rx.text("No results found.", size="4", color_scheme="gray"), width="100%", padding="20")),
+                spacing="5", padding="5", width="100%",
+            ),
+            on_mount=State.load_books
+        ),
+        login_page()
     )
 
 def volume_selector() -> rx.Component:
