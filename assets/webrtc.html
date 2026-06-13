@@ -279,6 +279,7 @@
     let novelFontSize = 18;
     
     const pendingRequests = new Map();
+    const coverCache = new Map();
 
     // Send RPC Request over WebRTC DataChannel
     function sendRequest(req) {
@@ -504,9 +505,13 @@
       filtered.forEach(book => {
         const card = document.createElement('div');
         card.className = 'rounded-xl bg-white/5 border border-white/5 overflow-hidden flex flex-col hover:scale-[1.02] hover:bg-white/10 transition shadow-lg';
+        
+        // 預設載入中佔位圖
+        const placeholderImg = 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="300" height="200" viewBox="0 0 300 200"><rect width="300" height="200" fill="%232D3748"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="%23A0AEC0" font-family="system-ui" font-size="14">載入中...</text></svg>';
+        
         card.innerHTML = `
           <div class="h-48 w-full bg-black/40 relative">
-            <img src="${book.cover_src || 'https://images.unsplash.com/photo-1543002588-bfa74002ed7e?w=300&auto=format&fit=crop'}" class="h-full w-full object-cover" alt="cover">
+            <img src="${placeholderImg}" class="h-full w-full object-cover" alt="cover">
             <span class="absolute top-2 right-2 px-2 py-0.5 text-[10px] bg-black/75 rounded text-pink-400 font-semibold">${book.category || '未分類'}</span>
           </div>
           <div class="p-4 flex-grow flex flex-col gap-2">
@@ -515,6 +520,26 @@
             <button class="mt-auto w-full py-2 bg-pink-600/20 text-pink-400 hover:bg-pink-600 hover:text-white rounded-lg text-xs font-semibold transition">開始閱讀</button>
           </div>
         `;
+        
+        const imgEl = card.querySelector('img');
+        
+        // 透過 WebRTC RPC 延遲加載封面圖片，避免資料傳輸通道佇列（Reassembly Queue）溢出
+        if (coverCache.has(book.id)) {
+          imgEl.src = coverCache.get(book.id);
+        } else {
+          sendRequest({ action: 'get_cover', book_id: book.id }).then(res => {
+            if (res && res.cover_src) {
+              coverCache.set(book.id, res.cover_src);
+              imgEl.src = res.cover_src;
+            } else {
+              imgEl.src = 'https://images.unsplash.com/photo-1543002588-bfa74002ed7e?w=300&auto=format&fit=crop';
+            }
+          }).catch(err => {
+            console.error('載入封面失敗:', book.title, err);
+            imgEl.src = 'https://images.unsplash.com/photo-1543002588-bfa74002ed7e?w=300&auto=format&fit=crop';
+          });
+        }
+        
         card.querySelector('button').onclick = () => selectBook(book);
         grid.appendChild(card);
       });

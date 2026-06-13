@@ -304,11 +304,31 @@ async def handle_webrtc_connection(offer_sdp, client_id):
                         
                     elif action == "get_library":
                         books, cat_order = _blocking_load_books()
+                        # 複製並移除大體積的 cover_src，改為在前端懶加載以防 WebRTC Reassembly Queue 耗盡
+                        books_light = []
+                        for b in books:
+                            b_copy = b.copy()
+                            if "cover_src" in b_copy:
+                                b_copy["cover_src"] = ""
+                            books_light.append(b_copy)
                         reply = {
                             "action": "library_response",
                             "request_id": req_id,
-                            "books": books,
+                            "books": books_light,
                             "category_order": cat_order
+                        }
+                        send_reply(channel, reply)
+                        
+                    elif action == "get_cover":
+                        book_id = decrypted.get("book_id")
+                        books, _ = _blocking_load_books()
+                        book = next((b for b in books if str(b.get("id")) == str(book_id)), None)
+                        cover_src = book.get("cover_src", "") if book else ""
+                        reply = {
+                            "action": "cover_response",
+                            "request_id": req_id,
+                            "book_id": book_id,
+                            "cover_src": cover_src
                         }
                         send_reply(channel, reply)
                         
