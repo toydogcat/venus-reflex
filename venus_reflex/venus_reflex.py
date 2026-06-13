@@ -147,7 +147,9 @@ class State(rx.State):
     category_order: List[str] = []
     search_query: str = ""
     expanded_categories: Set[str] = set()
+    expanded_subcategories: Set[str] = set()
     
+    # ... (skipping unchanged Reader/BGM/Volume state vars)
     selected_book_id: str = ""
     current_book_info: Dict[str, Any] = {}
     pages_list: List[str] = []
@@ -170,6 +172,7 @@ class State(rx.State):
     volume_search_query: str = ""
 
     async def load_books(self):
+        # ... (same as before)
         global _library_cache, _category_cache
         
         # Check global cache first
@@ -190,34 +193,49 @@ class State(rx.State):
             self.category_order = _category_cache
 
     @rx.var
-    def filtered_categories(self) -> Dict[str, List[Dict[str, Any]]]:
+    def filtered_categories(self) -> Dict[str, Dict[str, List[Dict[str, Any]]]]:
         result = {}
         query = self.search_query.lower()
         for book in self.all_books:
             title = book.get("title", "").lower()
             author = book.get("author", "").lower()
             category = book.get("category", "未分類")
-            if query in title or query in author or query.lower() in category.lower():
-                if category not in result: result[category] = []
-                result[category].append(book)
+            subcategory = book.get("subcategory", "")
+            
+            if query in title or query in author or query.lower() in category.lower() or query.lower() in subcategory.lower():
+                if category not in result: result[category] = {}
+                if subcategory not in result[category]: result[category][subcategory] = []
+                result[category][subcategory].append(book)
+        
+        # Sort books within each subcategory
         for cat in result:
-            result[cat] = sorted(result[cat], key=lambda x: natural_sort_key(x.get("title", "")))
+            for sub in result[cat]:
+                result[cat][sub] = sorted(result[cat][sub], key=lambda x: natural_sort_key(x.get("title", "")))
+        
+        # Final sorted result by category order
         sorted_result = {}
         for cat_name in self.category_order:
             if cat_name in result: sorted_result[cat_name] = result[cat_name]
         for cat_name in sorted(result.keys(), key=natural_sort_key):
             if cat_name not in sorted_result: sorted_result[cat_name] = result[cat_name]
+            
         return sorted_result
 
     def toggle_category(self, cat_name: str):
         if cat_name in self.expanded_categories: self.expanded_categories.remove(cat_name)
         else: self.expanded_categories.add(cat_name)
 
+    def toggle_subcategory(self, cat_sub: str):
+        if cat_sub in self.expanded_subcategories: self.expanded_subcategories.remove(cat_sub)
+        else: self.expanded_subcategories.add(cat_sub)
+
     def set_search_query(self, query: str):
         self.search_query = query
         if query:
-            for cat in self.filtered_categories.keys():
+            for cat, subs in self.filtered_categories.items():
                 self.expanded_categories.add(cat)
+                for sub in subs.keys():
+                    self.expanded_subcategories.add(f"{cat}/{sub}")
 
     async def select_book(self, book_id: str):
         book = next((b for b in self.all_books if b["id"] == book_id), None)
@@ -545,6 +563,21 @@ def render_element(el: Any, book_info: Any, novel_font_size: Any) -> rx.Componen
             background_color=el["bg_color"], z_index=el["z_index"],
             pointer_events="none"
         )),
+        ("markdown", rx.box(
+            rx.markdown(
+                el["content"],
+                font_size=rx.cond(
+                    el["font_size"],
+                    (el["font_size"].to(float) * novel_font_size / 24.0).to(str) + "px",
+                    novel_font_size.to(str) + "px"
+                ),
+                color=el["color"],
+                background_color=el["bg_color"],
+            ),
+            position="relative", width="100%", padding="40px",
+            background_color=el["bg_color"], z_index=el["z_index"],
+        )),
+
         rx.fragment()
     )
 
@@ -602,17 +635,44 @@ def index() -> rx.Component:
             ),
             rx.foreach(
                 State.filtered_categories,
-                lambda cat: rx.vstack(
+                lambda main_cat: rx.vstack(
                     rx.hstack(
-                        rx.heading(cat[0], size="6", border_left="4px solid var(--accent-9)", padding_left="3"),
+                        rx.heading(main_cat[0], size="6", border_left="4px solid var(--accent-9)", padding_left="3"),
                         rx.spacer(),
-                        rx.button(rx.cond(State.expanded_categories.contains(cat[0]), rx.icon("chevron-up"), rx.icon("chevron-down")), on_click=lambda: State.toggle_category(cat[0]), variant="ghost", size="1"),
-                        on_click=lambda: State.toggle_category(cat[0]),
+                        rx.button(rx.cond(State.expanded_categories.contains(main_cat[0]), rx.icon("chevron-up"), rx.icon("chevron-down")), on_click=lambda: State.toggle_category(main_cat[0]), variant="ghost", size="1"),
+                        on_click=lambda: State.toggle_category(main_cat[0]),
                         width="100%", cursor="pointer", padding_y="2"
                     ),
                     rx.cond(
-                        State.expanded_categories.contains(cat[0]),
-                        rx.flex(rx.foreach(cat[1], book_card), wrap="wrap", spacing="5", justify="start", width="100%", padding_y="4")
+                        State.expanded_categories.contains(main_cat[0]),
+                        rx.vstack(
+                            rx.foreach(
+                                main_cat[1],
+                                lambda sub_cat: rx.vstack(
+                                    # Sub-category Header (if name is not empty)
+                                    rx.cond(
+                                        sub_cat[0] != "",
+                                        rx.hstack(
+                                            rx.heading(sub_cat[0], size="4", color_scheme="gray", margin_left="4"),
+                                            rx.spacer(),
+                                            rx.button(
+                                                rx.cond(State.expanded_subcategories.contains(main_cat[0] + "/" + sub_cat[0]), rx.icon("minus"), rx.icon("plus")),
+                                                variant="ghost", size="1"
+                                            ),
+                                            on_click=lambda: State.toggle_subcategory(main_cat[0] + "/" + sub_cat[0]),
+                                            width="100%", cursor="pointer", padding_y="1", margin_top="2"
+                                        )
+                                    ),
+                                    # Books (show if no subcategory name OR if expanded)
+                                    rx.cond(
+                                        (sub_cat[0] == "") | State.expanded_subcategories.contains(main_cat[0] + "/" + sub_cat[0]),
+                                        rx.flex(rx.foreach(sub_cat[1], book_card), wrap="wrap", spacing="5", justify="start", width="100%", padding_y="4", padding_left=rx.cond(sub_cat[0] != "", "8", "0"))
+                                    ),
+                                    align_items="start", width="100%"
+                                )
+                            ),
+                            width="100%"
+                        )
                     ),
                     align_items="start", width="100%"
                 )
@@ -729,7 +789,7 @@ def reader() -> rx.Component:
         ),
     )
 
-app = rx.App(theme=rx.theme(appearance="dark", accent_color="blue"))
+app = rx.App()
 
 # Custom API route to serve assets from ZIP archives
 async def get_zip_asset(request: Request):
@@ -737,11 +797,15 @@ async def get_zip_asset(request: Request):
     asset_name = request.path_params.get("asset_name")
     
     global _library_cache
+    loop = asyncio.get_running_loop()
+    
     if not _library_cache:
         print("API: Library cache empty, triggering reload...")
-        books, _ = _blocking_load_books()
+        # Use executor to avoid blocking the main event loop
+        books, _ = await loop.run_in_executor(_io_executor, _blocking_load_books)
         with _library_cache_lock:
-            _library_cache = books
+            if not _library_cache:  # Double check
+                _library_cache = books
 
     book = next((b for b in _library_cache if b["id"] == book_id), None)
     if not book:
@@ -754,12 +818,15 @@ async def get_zip_asset(request: Request):
         return Response(status_code=404)
     
     try:
-        with zipfile.ZipFile(book["zip_path"], 'r') as z:
-            internal_path = os.path.normpath(os.path.join(book["zip_internal_prefix"], "assets", asset_name)).lstrip('./')
-            ext = Path(asset_name).suffix.lower()
-            media_types = {'.webp': 'image/webp', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.gif': 'image/gif'}
-            content = z.read(internal_path)
-            return Response(content=content, media_type=media_types.get(ext, 'application/octet-stream'))
+        def _read_zip_data():
+            with zipfile.ZipFile(book["zip_path"], 'r') as z:
+                internal_path = os.path.normpath(os.path.join(book["zip_internal_prefix"], "assets", asset_name)).lstrip('./')
+                return z.read(internal_path)
+        
+        content = await loop.run_in_executor(_io_executor, _read_zip_data)
+        ext = Path(asset_name).suffix.lower()
+        media_types = {'.webp': 'image/webp', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.gif': 'image/gif'}
+        return Response(content=content, media_type=media_types.get(ext, 'application/octet-stream'))
     except Exception as e:
         print(f"API Error serving zip asset {asset_name} from {book_id}: {e}")
         return Response(status_code=404)

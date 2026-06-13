@@ -1,0 +1,53 @@
+name: Deploy Frontend to GitHub Pages
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install Python Dependencies
+        run: |
+          uv sync
+
+      - name: Build Reflex Frontend
+        run: |
+          uv run reflex export --frontend-only --no-zip
+        env:
+          # If the user needs to override the API URL for production build:
+          # REFLEX_API_URL: https://your-backend-api.com
+          # For pure static hosting communicating via MQTT, we can set a dummy or leave it:
+          REFLEX_API_URL: http://localhost:8003
+
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: .web/build/client
+          force_orphan: true
